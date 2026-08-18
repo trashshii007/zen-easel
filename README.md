@@ -9,16 +9,20 @@ Requires [Sine](https://github.com/CosmoCreeper/Sine). In Sine's settings, enabl
 installing from unofficial sources, paste this repository's URL into the GitHub install
 field, and restart Zen.
 
+Requires the forked [Zen Libary](https://github.com/trashshii007/Zen-Library). 
+
 ## Opening a board
 
 `Ctrl+Shift+E`, the toolbar button, or the **Easels** section of the Zen Library. Boards
 open in an ordinary tab — they get a title and favicon, `Ctrl+W` closes one, and a
 restored session reopens the board you were on.
 
-Every board opens with a heading at the top. It is a real text box, and it is also the
+Every board opens with a heading at the top. It is a text box, and it is also the
 board's name: rename it anywhere and the tab, switcher and library card follow.
 
 ## Capturing the web
+
+<img width="396" height="186" alt="image" src="https://github.com/user-attachments/assets/5afb6da3-0d11-464d-b8b3-0bb99021feaf" />
 
 - **Zen's screenshot button** → **Move to easel** → pick a board → drag a region.
 - **After *Save visible page* / *Save full page*** → **Move to easel**.
@@ -30,6 +34,8 @@ board from the capture. Captures keep their source URL — double-click a card t
 to the page it came from.
 
 ## Tools
+
+<img width="538" height="245" alt="image" src="https://github.com/user-attachments/assets/191ee337-df59-435f-b2a0-cb1b66ddc2b7" />
 
 `V` select · `T` text · `R` rectangle · `O` ellipse · `Y` triangle · `L` line ·
 `A` arrow · `P` pen · `I` image
@@ -88,6 +94,8 @@ Pen strokes thin as the pen speeds up and follow stylus pressure. Set
 
 ## Text
 
+<img width="807" height="287" alt="image" src="https://github.com/user-attachments/assets/4c3bf02e-4def-4337-a827-4c0de72c0dc9" />
+
 Controls appear beside the box and apply live, including while typing:
 
 | | |
@@ -101,12 +109,16 @@ font. See [fonts/LICENSE.md](fonts/LICENSE.md).
 
 ## Backgrounds
 
+<img width="345" height="432" alt="image" src="https://github.com/user-attachments/assets/62ae3da4-3c34-4201-929c-254c74699397" />
+
 Right-click empty canvas for nine background swatches, saved per board. **Arc** is the
 default; **Follow theme** tracks Zen between light and dark; **Transparent** declines to
 tint at all. Every board is a tint rather than a fill, and the toolbar, popups and menus
 take the active board's colour.
 
 ## Live web cards and web tiles
+
+<img width="918" height="544" alt="image" src="https://github.com/user-attachments/assets/da62dfe2-dd5f-43ca-9569-1cc34c2b468d" />
 
 Press **▶** in a capture's title strip and the pixels are replaced by the real page,
 cropped to the region you captured. Press **❚❚** to go back to the screenshot. Click a
