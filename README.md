@@ -3,6 +3,9 @@
 A port of Arc's Easel to Zen. An infinite canvas at `about:easel` for web captures, text,
 shapes and ink. Everything is stored locally in your Zen profile.
 
+<img width="1716" height="756" alt="image" src="https://github.com/user-attachments/assets/866b8b9d-8ca2-4720-a6ff-00cd973b99cd" />
+
+
 ## Install
 
 Requires [Sine](https://github.com/CosmoCreeper/Sine). In Sine's settings, enable
