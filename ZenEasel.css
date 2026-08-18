@@ -1,0 +1,810 @@
+/* Zen Easel — overlay styles.
+ *
+ * Loaded into the shadow root of <zen-easel>. The global half of the mod (toolbar
+ * button, capture overlay) lives in chrome.css instead; nothing here leaks out and
+ * nothing out there reaches in.
+ */
+
+:host {
+  /* Position and size are set inline by the controller, mirrored from the content
+     area so Zen's sidebar and toolbars stay visible and usable underneath. */
+  position: fixed;
+  z-index: 3;
+  display: block;
+  color-scheme: light dark;
+
+  /* The board's own colour, in three forms. --easel-tint is its channels, written by
+     _applyBackground from the active preset; --easel-solid is the same colour opaque,
+     for the handful of things that cannot be see-through; --easel-bg is the tint the
+     "Follow theme" board paints, and the fallback until the first _applyBackground
+     runs. Every board is a tint over Zen's window, so these carry alpha by design. */
+  --easel-tint: 251, 251, 250;
+  /* Not light-dark(): the renderer reads this one through getComputedStyle to paint on
+     a canvas, and an unregistered custom property hands back the literal token rather
+     than a resolved colour — "light-dark(#fbfbfa, #1b1b1d)" is not something fillStyle
+     can parse. A media query resolves at declaration time instead. */
+  --easel-solid: #fbfbfa;
+  /* The selection grips. Not --easel-solid: a handle painted in the board's own colour
+     is a handle you cannot see. It lands one step *brighter* than the board in both
+     directions — white over a light board, a lifted neutral over a dark one — so the
+     grip reads as raised off the surface either way, with the accent ring delimiting
+     it. Resolved by media query for the same reason --easel-solid is. */
+  --easel-handle: #ffffff;
+  --easel-bg: light-dark(rgba(251, 251, 250, 0.44), rgba(27, 27, 29, 0.50));
+  --easel-grid: light-dark(rgba(0, 0, 0, 0.11), rgba(255, 255, 255, 0.10));
+
+  /* Chrome — topbar, toolbar, popups, menus — is the board's colour at a heavier
+     alpha, so it reads as part of the same surface instead of a grey strip parked on
+     top of it. It has to stay well clear of the board's own alpha: these hold text and
+     controls, and whatever wallpaper is behind them must not compete with a label. */
+  --easel-panel: rgba(var(--easel-tint), 0.82);
+  --easel-panel-border: light-dark(rgba(0, 0, 0, 0.10), rgba(255, 255, 255, 0.12));
+  --easel-text: light-dark(#1f1f1f, #ededed);
+  --easel-muted: light-dark(rgba(0, 0, 0, 0.52), rgba(255, 255, 255, 0.52));
+  --easel-hover-bg: light-dark(rgba(0, 0, 0, 0.06), rgba(255, 255, 255, 0.09));
+  --easel-active-bg: light-dark(rgba(0, 0, 0, 0.11), rgba(255, 255, 255, 0.16));
+  --easel-danger: #e5484d;
+  /* Two-layer shadow: a tight contact shadow plus a wide soft one. A single large
+     blur reads as fog; this reads as a card resting on the board, which is most of
+     what makes Arc's floating panels look solid. */
+  --easel-shadow:
+    0 1px 2px light-dark(rgba(0, 0, 0, 0.07), rgba(0, 0, 0, 0.30)),
+    0 12px 32px light-dark(rgba(0, 0, 0, 0.12), rgba(0, 0, 0, 0.45));
+
+  /* Overridden from Zen's own theme by _syncZenColors when those vars exist. */
+  --easel-accent: light-dark(#6c4ee0, #a992ff);
+  --easel-accent-soft: light-dark(rgba(108, 78, 224, 0.13), rgba(169, 146, 255, 0.20));
+  --easel-accent-strong: light-dark(#5b3fd0, #c3b2ff);
+  --easel-tool-ink: light-dark(#4a4458, #d6d2e0);
+  --easel-radius: 12px;
+
+  /* One easing for everything, so panels, tools and popups feel like one system. */
+  --easel-ease: cubic-bezier(0.22, 1, 0.36, 1);
+
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: var(--easel-text);
+}
+
+@media (prefers-color-scheme: dark) {
+  :host {
+    --easel-tint: 27, 27, 29;
+    --easel-solid: #1b1b1d;
+    --easel-handle: #40404a;
+  }
+}
+
+/* The chrome's ink follows the *board*, not the OS: a Slate board under a light system
+   theme still needs light text on it, and light-dark() cannot say so because it is
+   answering a different question. _applyBackground writes data-easel-ink once it knows
+   which board is open; until then the light-dark() values above stand, which is the
+   right answer for the "Follow theme" board an easel starts on. */
+:host([data-easel-ink="light"]) {
+  --easel-panel-border: rgba(0, 0, 0, 0.10);
+  --easel-text: #1f1f1f;
+  --easel-muted: rgba(0, 0, 0, 0.52);
+  --easel-hover-bg: rgba(0, 0, 0, 0.06);
+  --easel-active-bg: rgba(0, 0, 0, 0.11);
+  --easel-tool-ink: #4a4458;
+  /* White clears every light board — Arc #FAFAFC, Paper #F6F2E9, Mist #E9EDF1 — so a
+     grip always sits above the surface it is resizing. */
+  --easel-handle: #ffffff;
+}
+
+:host([data-easel-ink="dark"]) {
+  --easel-panel-border: rgba(255, 255, 255, 0.13);
+  --easel-text: #ededed;
+  --easel-muted: rgba(255, 255, 255, 0.55);
+  --easel-hover-bg: rgba(255, 255, 255, 0.10);
+  --easel-active-bg: rgba(255, 255, 255, 0.17);
+  --easel-tool-ink: #d6d2e0;
+  /* A dark tint over a bright wallpaper needs more body than a light one over the same
+     wallpaper: light text on a half-lit dark panel is the pairing that goes first. */
+  --easel-panel: rgba(var(--easel-tint), 0.88);
+  /* Lifted, not white. White grips would be the only light-scheme thing left on a dark
+     board once the chrome has flipped, and they read as glare against Ink or Black.
+     This clears the darkest board it has to sit on — Slate #2A2E35 — by enough to be a
+     disc rather than a hole, and the accent ring carries the rest. */
+  --easel-handle: #40404a;
+}
+
+.easel-root {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  /* Never paints. Every board is a tint with an alpha, and this shell sits behind the
+     viewport — anything it painted would be composited under the tint twice over and
+     the transparency would buy nothing. The viewport is the single painter of the
+     board's colour; the topbar paints its own. */
+  background: transparent;
+  border-radius: var(--easel-radius);
+  box-sizing: border-box;
+}
+
+/* ------------------------------------------------------------------- topbar */
+
+/* Wears the board's colour. --easel-panel is the active board's tint at a heavier
+   alpha, so switching from Paper to Ink carries the bar with it instead of leaving a
+   grey strip sitting on a dark board — and because it keeps an alpha, the wallpaper
+   behind Zen still reads through the whole window rather than stopping at the bar.
+   The transition is what makes a board change read as one move. */
+.easel-topbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  height: 44px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--easel-panel-border);
+  background: var(--easel-panel);
+  transition: background 260ms var(--easel-ease), color 260ms var(--easel-ease);
+  z-index: 3;
+}
+
+.easel-topbar-left {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.easel-topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.easel-switcher,
+.easel-topbar-button,
+.easel-zoom {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--easel-text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.easel-switcher { font-weight: 600; max-width: 40ch; }
+.easel-title-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.easel-chevron { font-size: 10px; opacity: 0.6; }
+.easel-zoom { font-variant-numeric: tabular-nums; color: var(--easel-muted); min-width: 52px; justify-content: center; }
+
+.easel-switcher:hover,
+.easel-topbar-button:hover,
+.easel-zoom:hover { background: var(--easel-hover-bg); }
+.easel-switcher.is-open { background: var(--easel-active-bg); }
+.easel-close { font-size: 14px; }
+
+/* ---------------------------------------------------------------- easel list */
+
+.easel-list {
+  position: absolute;
+  top: 34px;
+  left: 0;
+  min-width: 260px;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--easel-panel-border);
+  border-radius: 14px;
+  background: var(--easel-panel);
+  box-shadow: var(--easel-shadow);
+  backdrop-filter: blur(20px) saturate(140%);
+  z-index: 10;
+  animation: easel-pop 150ms var(--easel-ease) both;
+  transform-origin: top left;
+}
+
+.easel-list[hidden] { display: none; }
+
+.easel-list-item,
+.easel-list-action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--easel-text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.easel-list-item,
+.easel-list-action { transition: background 110ms var(--easel-ease); }
+.easel-list-item:hover,
+.easel-list-action:hover { background: var(--easel-hover-bg); }
+.easel-list-item.is-current { background: var(--easel-active-bg); font-weight: 600; }
+.easel-list-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.easel-list-when { flex: none; font-size: 11px; color: var(--easel-muted); }
+.easel-list-action.is-danger { color: var(--easel-danger); }
+
+.easel-list-separator {
+  height: 1px;
+  margin: 6px 4px;
+  background: var(--easel-panel-border);
+}
+
+/* ----------------------------------------------------------------- viewport */
+
+.easel-viewport {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  outline: none;
+  touch-action: none;             /* pointer events drive pan/zoom, not the compositor */
+  /* The single painter of the board's colour, and always a tint: _applyBackground
+     writes the active preset's rgba() into the inline style, and this light-dark()
+     value is what the "Follow theme" board falls back to. */
+  background-color: var(--easel-bg);
+  transition: background-color 260ms var(--easel-ease);
+  cursor: default;
+}
+
+.easel-viewport[data-tool="text"] { cursor: text; }
+.easel-viewport[data-tool="pen"],
+.easel-viewport[data-tool="rectangle"],
+.easel-viewport[data-tool="ellipse"],
+.easel-viewport[data-tool="triangle"],
+.easel-viewport[data-tool="line"],
+.easel-viewport[data-tool="arrow"] { cursor: crosshair; }
+/* No rule for data-tool="image": it is an action, not a mode — the button opens the
+   file picker directly and the tool is back to the pointer before the cursor could
+   ever be seen. */
+
+/* No document open — only reachable if the store failed to load or create one. */
+.easel-viewport.is-empty-document::before {
+  content: "No easel is open.";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  color: var(--easel-muted);
+  font-size: 13px;
+}
+
+/* ------------------------------------------------------------- canvas layers */
+
+/* Animated images. Below the canvases, so a GIF covers the board's grid and everything
+   drawn on the canvas draws over the GIF — see modules/media-layer.uc.js for why that
+   ordering is the one worth having. Clipped to the viewport so a card panned off the
+   board does not paint over the toolbar. */
+.easel-media-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  /* The canvas owns every pointer event; these are pixels, not controls. */
+  pointer-events: none;
+}
+
+.easel-media-item {
+  position: absolute;
+  /* Matches the canvas's own drawImage, which stretches to the object's box rather
+     than preserving the file's aspect ratio — the object *is* the frame. */
+  object-fit: fill;
+  transform-origin: center center;
+}
+
+.easel-canvas {
+  position: absolute;
+  inset: 0;
+  /* The viewport owns every pointer event. Letting the canvases take them would make
+     e.target a canvas and break the menu/editor checks in _onPointerDown. */
+  pointer-events: none;
+}
+
+/* Stacking order: committed scene, then whatever is under the pointer right now, then
+   selection chrome. Live cards are not in this list — they are <browser> elements in the
+   browser window, above this document entirely, so a live card covers the canvas
+   including the selection handles. Arc has the same constraint for the same reason. */
+.easel-canvas-static { z-index: 1; }
+.easel-canvas-active { z-index: 3; }
+.easel-canvas-overlay { z-index: 4; }
+
+/* Live cards are <browser> elements in the *browser window*, not in this page — a
+   system-principal document cannot host web content, so there is nothing here to style.
+   Their layer and tiles are created and positioned by modules-host/live-host.uc.js. */
+
+/* ------------------------------------------------------------- text editor */
+
+/* A real textarea over the canvas while a box is being edited; the canvas skips
+   painting that object meanwhile, so there is exactly one visible copy. Its metrics
+   are set inline from the object and the zoom. */
+.easel-text-editor {
+  position: absolute;
+  z-index: 4;
+  margin: 0;
+  border: none;
+  outline: none;
+  padding: 0;
+  resize: none;
+  overflow: hidden;
+  background: transparent;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  box-sizing: border-box;
+  border-radius: 4px;
+  /* No ring around the editor. Text on an Arc easel is just text sitting on the board —
+     a box drawn around it makes every label look like a form field, and the caret plus
+     the floating size controls are already enough to show that you are editing. */
+  caret-color: var(--easel-accent);
+}
+
+/* ------------------------------------------------------------------ toolbar */
+
+/* Bottom-left, as Arc places it: out of the way of a board you are building from the
+   top-left, and always in the same place regardless of window width — unlike a centred
+   bar, which moves under your cursor every time the window resizes. */
+.easel-toolbar {
+  position: absolute;
+  bottom: 18px;
+  left: 18px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid var(--easel-panel-border);
+  border-radius: 16px;
+  background: var(--easel-panel);
+  box-shadow: var(--easel-shadow);
+  backdrop-filter: blur(20px) saturate(140%);
+  z-index: 4;
+  animation: easel-rise 220ms var(--easel-ease) both;
+}
+
+.easel-tool-group { display: flex; align-items: center; gap: 2px; }
+
+.easel-toolbar-divider {
+  width: 1px;
+  align-self: stretch;
+  margin: 4px 2px;
+  background: var(--easel-panel-border);
+}
+
+.easel-tool {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: none;
+  border-radius: 11px;
+  background: transparent;
+  color: var(--easel-tool-ink);
+  cursor: pointer;
+  transition: background 140ms var(--easel-ease), color 140ms var(--easel-ease),
+              transform 140ms var(--easel-ease);
+}
+
+.easel-tool:hover { background: var(--easel-hover-bg); }
+.easel-tool:active { transform: scale(0.92); }
+
+/* Arc's active tool is a soft filled tile in the accent tint rather than a hard
+   inversion, which is why the strip stays quiet while still showing state. */
+.easel-tool.is-active {
+  background: var(--easel-accent-soft);
+  color: var(--easel-accent-strong);
+}
+
+.easel-icon { width: 20px; height: 20px; }
+
+/* One button standing in for the whole palette. The dot shows the current colour and
+   its diameter shows the current stroke width, so the toolbar reports both without
+   spending ten slots on swatches. */
+.easel-color-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: none;
+  border-radius: 11px;
+  background: transparent;
+  cursor: pointer;
+  transition: background 140ms var(--easel-ease);
+}
+
+.easel-color-button:hover,
+.easel-color-button.is-open { background: var(--easel-hover-bg); }
+
+.easel-color-dot {
+  display: block;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #1f1f1f;
+  box-shadow: 0 0 0 1px var(--easel-panel-border) inset;
+  transition: width 140ms var(--easel-ease), height 140ms var(--easel-ease),
+              background 140ms var(--easel-ease);
+}
+
+/* ---------------------------------------------------------- toolbar popups */
+
+.easel-popup {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  padding: 8px;
+  border: 1px solid var(--easel-panel-border);
+  border-radius: 14px;
+  background: var(--easel-panel);
+  box-shadow: var(--easel-shadow);
+  backdrop-filter: blur(20px) saturate(140%);
+  z-index: 6;
+  animation: easel-rise 160ms var(--easel-ease) both;
+}
+
+.easel-popup-swatches {
+  display: grid;
+  grid-template-columns: repeat(5, 22px);
+  gap: 7px;
+}
+
+.easel-swatch {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--easel-panel-border);
+  border-radius: 50%;
+  background: var(--swatch);
+  cursor: pointer;
+  transition: transform 120ms var(--easel-ease), box-shadow 120ms var(--easel-ease);
+}
+
+.easel-swatch:hover { transform: scale(1.14); }
+/* The inner ring is the gap between the swatch and the accent ring, so it has to be
+   opaque — the tinted --easel-panel would show the swatch straight through it and the
+   two rings would merge. --easel-solid is the same colour the popup is wearing. */
+.easel-swatch.is-active {
+  box-shadow: 0 0 0 2px var(--easel-solid), 0 0 0 4px var(--easel-accent);
+}
+
+.easel-popup-widths {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px solid var(--easel-panel-border);
+}
+
+.easel-width {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  height: 30px;
+  padding: 0;
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  cursor: pointer;
+  transition: background 120ms var(--easel-ease);
+}
+
+.easel-width:hover { background: var(--easel-hover-bg); }
+.easel-width.is-active { background: var(--easel-accent-soft); }
+.easel-width > span {
+  display: block;
+  border-radius: 50%;
+  background: var(--easel-text);
+}
+
+/* ------------------------------------------------------------ text controls */
+
+/* The +/Aa/- stepper that rides beside a text box, as Arc does it. Size is a property
+   of the thing you are looking at, so the control sits next to that thing rather than
+   in the toolbar. */
+.easel-text-controls {
+  position: absolute;
+  display: none;
+  flex-direction: column;
+  align-items: stretch;
+  width: 36px;
+  padding: 3px;
+  border: 1px solid var(--easel-panel-border);
+  border-radius: 12px;
+  background: var(--easel-panel);
+  box-shadow: var(--easel-shadow);
+  backdrop-filter: blur(20px) saturate(140%);
+  z-index: 5;
+}
+
+.easel-text-controls.is-visible {
+  display: flex;
+  animation: easel-pop 160ms var(--easel-ease) both;
+}
+
+/* Two buttons that open lists — Aa for typefaces, the size button for Arc's paragraph
+   styles — and the highlighter below a divider. Both list buttons share a shape so the
+   strip reads as one control rather than three unrelated ones. */
+.easel-text-font {
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--easel-text);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  font-family: Georgia, "Times New Roman", serif;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 120ms var(--easel-ease);
+}
+
+/* The size button carries a word, not a glyph. Sized so the longest of Arc's five
+   style names, "Ultra", still fits the 36px column without the strip widening. */
+.easel-text-size {
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: -0.01em;
+  border-top: 1px solid var(--easel-panel-border);
+  border-bottom: 1px solid var(--easel-panel-border);
+  border-radius: 0;
+}
+
+/* ------------------------------------------------------------------- highlight */
+
+.easel-text-divider {
+  height: 1px;
+  margin: 3px 2px;
+  background: var(--easel-panel-border);
+}
+
+.easel-text-fill {
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--easel-text);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 120ms var(--easel-ease);
+}
+
+.easel-text-fill:hover { background: var(--easel-hover-bg); }
+.easel-text-fill.is-active {
+  background: var(--easel-accent-soft);
+  color: var(--easel-accent-strong);
+}
+
+.easel-text-font:hover { background: var(--easel-hover-bg); }
+.easel-text-font.is-open { background: var(--easel-accent-soft); color: var(--easel-accent-strong); }
+
+/* ------------------------------------------------------------- shape controls */
+
+/* The sibling of .easel-text-controls, and deliberately identical in geometry: the two
+   strips appear in the same place for the same reason, and a shape and a text box sitting
+   side by side should not put differently-shaped panels next to each other. */
+.easel-shape-controls {
+  position: absolute;
+  display: none;
+  flex-direction: column;
+  align-items: stretch;
+  width: 36px;
+  padding: 3px;
+  gap: 2px;
+  border: 1px solid var(--easel-panel-border);
+  border-radius: 12px;
+  background: var(--easel-panel);
+  box-shadow: var(--easel-shadow);
+  backdrop-filter: blur(20px) saturate(140%);
+  z-index: 5;
+}
+
+.easel-shape-controls.is-visible {
+  display: flex;
+  animation: easel-pop 160ms var(--easel-ease) both;
+}
+
+.easel-shape-option {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--easel-text);
+  cursor: pointer;
+  transition: background 120ms var(--easel-ease), color 120ms var(--easel-ease);
+}
+
+.easel-shape-option:hover { background: var(--easel-hover-bg); }
+.easel-shape-option.is-active {
+  background: var(--easel-accent-soft);
+  color: var(--easel-accent-strong);
+}
+
+/* Drawn rather than typed. ■ and □ differ in weight, size and baseline between fonts, and
+   these two have to read as one square in two states. currentColor ties both to the
+   button, so the active swatch picks up the accent without a second rule. */
+.easel-shape-swatch {
+  width: 14px;
+  height: 14px;
+  border: 2px solid currentColor;
+  border-radius: 3px;
+}
+
+.easel-shape-swatch.is-solid { background: currentColor; }
+
+.easel-font-panel {
+  position: absolute;
+  min-width: 190px;
+  padding: 6px;
+  border: 1px solid var(--easel-panel-border);
+  border-radius: 14px;
+  background: var(--easel-panel);
+  box-shadow: var(--easel-shadow);
+  backdrop-filter: blur(20px) saturate(140%);
+  z-index: 6;
+  animation: easel-pop 160ms var(--easel-ease) both;
+}
+
+.easel-font-option {
+  display: block;
+  width: 100%;
+  padding: 9px 11px;
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--easel-text);
+  font-size: 16px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 120ms var(--easel-ease);
+}
+
+.easel-font-option:hover { background: var(--easel-hover-bg); }
+.easel-font-option.is-active { background: var(--easel-accent-soft); color: var(--easel-accent-strong); }
+
+/* ------------------------------------------------------------- context menu */
+
+.easel-menu-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 5;
+}
+
+.easel-menu {
+  position: absolute;
+  min-width: 190px;
+  padding: 5px;
+  border: 1px solid var(--easel-panel-border);
+  border-radius: 10px;
+  background: var(--easel-panel);
+  box-shadow: var(--easel-shadow);
+  backdrop-filter: blur(20px) saturate(140%);
+  pointer-events: auto;
+  animation: easel-pop 130ms var(--easel-ease) both;
+  transform-origin: top left;
+}
+
+.easel-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  padding: 6px 9px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--easel-text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.easel-menu-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.easel-menu-item { transition: background 110ms var(--easel-ease); }
+.easel-menu-item:hover { background: var(--easel-hover-bg); }
+.easel-menu-item[disabled] { opacity: 0.4; cursor: default; }
+.easel-menu-item[disabled]:hover { background: transparent; }
+.easel-menu-item.is-danger { color: var(--easel-danger); }
+.easel-menu-hint { font-size: 11px; color: var(--easel-muted); font-variant-numeric: tabular-nums; }
+
+.easel-menu-separator {
+  height: 1px;
+  margin: 5px 4px;
+  background: var(--easel-panel-border);
+}
+
+.easel-menu-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 5px 8px 2px;
+  max-width: 220px;
+}
+
+.easel-menu-swatch {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--easel-panel-border);
+  border-radius: 50%;
+  background: var(--swatch);
+  cursor: pointer;
+}
+
+/* "Follow theme" has no colour of its own — show it as a split light/dark disc. */
+.easel-menu-swatch.is-theme {
+  background: linear-gradient(135deg, #fbfbfa 0 50%, #1b1b1d 50% 100%);
+}
+
+.easel-menu-swatch.is-active {
+  box-shadow: 0 0 0 2px var(--easel-solid), 0 0 0 3.5px var(--easel-accent);
+}
+
+/* -------------------------------------------------------------------- error */
+
+.easel-error {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  padding: 14px 18px;
+  border-radius: 10px;
+  background: var(--easel-panel);
+  border: 1px solid var(--easel-danger);
+  color: var(--easel-text);
+  font-size: 13px;
+  max-width: 60ch;
+  text-align: center;
+}
+
+/* -------------------------------------------------------------- animations */
+
+/* Floating panels rise into place rather than appearing. Small distances and a fast
+   decelerating curve — enough to read as motion, not enough to wait for. */
+@keyframes easel-rise {
+  from { opacity: 0; transform: translateY(8px) scale(0.97); }
+  to   { opacity: 1; transform: none; }
+}
+
+@keyframes easel-pop {
+  from { opacity: 0; transform: scale(0.94); }
+  to   { opacity: 1; transform: none; }
+}
+
+@keyframes easel-fade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* The board itself fades up on open, which is what stops the overlay from feeling
+   like it is slammed over the page. */
+.easel-root { animation: easel-fade 180ms var(--easel-ease) both; }
+.easel-topbar { animation: easel-rise 200ms var(--easel-ease) both; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}

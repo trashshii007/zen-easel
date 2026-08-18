@@ -1,0 +1,170 @@
+[
+  {
+    "type": "text",
+    "label": "Zen Easel",
+    "size": "20px",
+    "margin": "18px 0 2px 0"
+  },
+  {
+    "type": "text",
+    "label": "An infinite canvas for web captures, text, shapes and ink. Everything is stored locally as JSON and PNG inside your Zen profile — nothing is uploaded anywhere.",
+    "size": "12px",
+    "margin": "0 0 6px 0"
+  },
+
+  {
+    "type": "separator",
+    "label": "Shortcuts — restart to apply",
+    "margin": "20px 0 10px 0"
+  },
+  {
+    "type": "string",
+    "property": "zen.easel.shortcut.new",
+    "label": "Open Easel. Accepts modifiers Ctrl, Alt, Shift and a single key, joined by +. Note that Ctrl+Shift+E is also the DevTools Network Monitor while DevTools has focus.",
+    "defaultValue": "Ctrl+Shift+E",
+    "placeholder": "Ctrl+Shift+E"
+  },
+  {
+    "type": "string",
+    "property": "zen.easel.shortcut.capture",
+    "label": "Capture a region of the current page onto the easel.",
+    "defaultValue": "Ctrl+Shift+2",
+    "placeholder": "Ctrl+Shift+2"
+  },
+
+  {
+    "type": "separator",
+    "label": "Canvas — applies live",
+    "margin": "20px 0 10px 0"
+  },
+  {
+    "type": "dropdown",
+    "property": "zen.easel.wheel",
+    "label": "What the scroll wheel does. Ctrl+wheel always zooms either way, and pinch on a precision touchpad arrives as Ctrl+wheel, so touchpad users may prefer Scroll.",
+    "defaultValue": "zoom",
+    "options": [
+      { "value": "zoom", "label": "Zoom (centred on the pointer)" },
+      { "value": "pan", "label": "Scroll the canvas" }
+    ]
+  },
+  {
+    "type": "dropdown",
+    "property": "zen.easel.ink-style",
+    "label": "Pen stroke style. Variable width thins the line as the pen speeds up, and follows real pressure on a stylus.",
+    "defaultValue": "variable",
+    "options": [
+      { "value": "variable", "label": "Variable width" },
+      { "value": "uniform", "label": "Uniform width" }
+    ]
+  },
+  {
+    "type": "dropdown",
+    "property": "zen.easel.grid",
+    "label": "Canvas grid. The board's own colour is set per easel — right-click empty canvas.",
+    "defaultValue": "dots",
+    "placeholder": "dots",
+    "options": [
+      { "value": "none", "label": "Plain" },
+      { "value": "dots", "label": "Dots" },
+      { "value": "lines", "label": "Grid lines" }
+    ]
+  },
+  {
+    "type": "dropdown",
+    "property": "zen.easel.snap",
+    "label": "How objects snap while you move them. Alignment guides line an object up with its neighbours' edges and centres and draw a line showing what it matched — this is what Arc does, and it is what makes a board look tidy without a grid. A fast drag never snaps. Hold Alt to suppress it.",
+    "defaultValue": "guides",
+    "options": [
+      { "value": "guides", "label": "Alignment guides (to other objects)" },
+      { "value": "grid", "label": "Grid (to fixed intervals)" },
+      { "value": "none", "label": "No snapping" }
+    ]
+  },
+  {
+    "type": "string",
+    "value": "number",
+    "property": "zen.easel.grid-size",
+    "label": "Grid size in canvas pixels.",
+    "defaultValue": 24,
+    "placeholder": "24"
+  },
+
+  {
+    "type": "separator",
+    "label": "Live web cards",
+    "margin": "20px 0 10px 0"
+  },
+  {
+    "type": "text",
+    "label": "A capture can be flipped from a screenshot to the real, live website, cropped to the same region. This is the one part of Zen Easel that touches the network: a live card loads the site with your normal cookies and session, exactly as an ordinary tab would. Cards always open as screenshots and only go live when you ask.",
+    "size": "12px",
+    "margin": "0 0 8px 0"
+  },
+  {
+    "type": "checkbox",
+    "property": "zen.easel.live.enabled",
+    "label": "Allow cards to be made live. Off means no easel ever loads a website, whatever is saved in a document.",
+    "defaultValue": true
+  },
+  {
+    "type": "string",
+    "value": "number",
+    "property": "zen.easel.live.max-tiles",
+    "label": "How many cards may be live at once. Cards that scroll out of view revert to their screenshot, and every card on the board tears down when the easel tab is in the background.",
+    "defaultValue": 3,
+    "placeholder": "3"
+  },
+  {
+    "type": "checkbox",
+    "property": "zen.easel.live.private",
+    "label": "Load live cards in a private session. Sites will render logged out, which is the point — use it when you would rather a board not carry your session around.",
+    "defaultValue": false
+  },
+  {
+    "type": "string",
+    "value": "number",
+    "property": "zen.easel.live.container",
+    "label": "Container ID to load live cards in, or 0 for your normal session. Isolates their cookies from ordinary browsing.",
+    "defaultValue": 0,
+    "placeholder": "0"
+  },
+  {
+    "type": "checkbox",
+    "property": "zen.easel.live.allow-http",
+    "label": "Allow live cards over plain http. Off by default: a stored http link is fine to keep and to open in a tab, but loading it silently inside an easel is a downgrade you did not ask for.",
+    "defaultValue": false
+  },
+
+  {
+    "type": "separator",
+    "label": "Storage",
+    "margin": "20px 0 10px 0"
+  },
+  {
+    "type": "string",
+    "value": "number",
+    "property": "zen.easel.autosave-ms",
+    "label": "Autosave delay in milliseconds after the last change. Lower means less can be lost in a crash; higher means fewer disk writes.",
+    "defaultValue": 500,
+    "placeholder": "500"
+  },
+  {
+    "type": "string",
+    "property": "zen.easel.storage-dir",
+    "label": "Where easels are stored. Leave empty to use zen-easels inside your profile folder.",
+    "defaultValue": "",
+    "placeholder": "(profile)/zen-easels"
+  },
+
+  {
+    "type": "separator",
+    "label": "Development",
+    "margin": "20px 0 10px 0"
+  },
+  {
+    "type": "checkbox",
+    "property": "zen.easel.debug",
+    "label": "Log [zen-easel] diagnostics to the Browser Console.",
+    "defaultValue": false
+  }
+]

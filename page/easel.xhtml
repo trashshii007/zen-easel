@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Zen Easel — the standalone page behind about:easel.
+
+  Served by background/registry.sys.mjs as a system-principal chrome document in the
+  parent process, which is what lets it use IOUtils for storage and create the
+  chrome-privileged <browser> elements that live web cards are built from.
+
+  XHTML rather than HTML because live tiles create XUL <browser> elements inside this
+  document, and the XUL namespace has to be declarable.
+-->
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:xul="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+      lang="en">
+<head>
+  <meta charset="utf-8"/>
+
+  <!--
+    The mod's premise is that it never touches the network, and this is what turns that
+    from a convention into something the engine enforces.
+
+    connect-src 'none' means no fetch/XHR/WebSocket can be added later without the CSP
+    being edited first. The absence of http:/https: from img-src is deliberate too: it
+    is what makes capture.uc.js's "local favicons only" rule a guarantee rather than a
+    filter someone can forget to apply.
+
+    There is deliberately no frame-src. It was added at one point to let live web cards
+    load, on the theory that a card was a nested browsing context inside this document —
+    which was correct as far as it went, since frame-src falls back to child-src and then
+    to default-src chrome:. But it was treating a symptom: this page cannot host web
+    content at all. A system-principal document refuses it in every form, remote or not,
+    <iframe> or <browser>, with the docshell returning NS_ERROR_CONTENT_BLOCKED before CSP
+    is even consulted. Live tiles therefore live in the browser window instead —
+    modules-host/live-host.uc.js — and this page never frames anything.
+
+    So the policy stays closed: no network of any kind originates here. connect-src 'none'
+    means no fetch/XHR can be added later without this being edited first, and the absence
+    of http:/https: from img-src makes "local favicons only" an engine guarantee rather
+    than a filter someone can forget to apply.
+  -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src chrome:;
+                 script-src chrome:;
+                 style-src chrome: 'unsafe-inline';
+                 img-src chrome: blob: data: page-icon:;
+                 connect-src 'none';
+                 object-src 'none'"/>
+
+  <title>Easel</title>
+
+  <!--
+    Sine's stylesheet manager only auto-applies a mod's chrome.css to windows whose
+    location starts with "chrome://" (JS/services/stylesheets.sys.mjs:192), so it will
+    never fire for about:easel. The page links its own styles.
+  -->
+  <link rel="icon" type="image/svg+xml"
+        href="chrome://sine/content/zen-easel/resources/zen-easel.svg"/>
+  <link rel="stylesheet" href="chrome://sine/content/zen-easel/page/easel-page.css"/>
+
+  <!--
+    The loader of record. Sine also registers page/easel-page.uc.js against about:easel
+    so edits hot-reload, but that path attaches on "load" and then awaits a JSON read off
+    disk, which lands well after first paint. A parse-time <script> is deterministic and
+    is what makes a cold start — including a session-restored tab — reliable.
+  -->
+  <script src="chrome://sine/content/zen-easel/page/easel-boot.js"/>
+</head>
+<body>
+  <zen-easel id="zen-easel-page"></zen-easel>
+</body>
+</html>

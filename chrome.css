@@ -1,0 +1,145 @@
+/* Zen Easel — global chrome styles.
+ *
+ * Only the two things that must live outside the overlay's shadow root: the toolbar
+ * button, and the region-capture overlay (which is deliberately built in the chrome
+ * document so it works over about: pages and the PDF viewer, where a content script
+ * would never run).
+ */
+
+#zen-easel-button .toolbarbutton-icon {
+  list-style-image: url("chrome://sine/content/zen-easel/resources/zen-easel.svg");
+  /* Without -moz-context-properties the SVG's context-stroke resolves to nothing and
+     the icon renders invisible. This is what lets one file work in both themes. */
+  -moz-context-properties: fill, stroke, fill-opacity;
+  fill: currentColor;
+  stroke: currentColor;
+  opacity: 0.7;
+}
+
+#zen-easel-button:hover .toolbarbutton-icon {
+  opacity: 1;
+}
+
+/* Arc's own Easel typefaces, limited to the openly licensed ones — see
+ * fonts/LICENSE.md for what was left out and why. Prefixed family names so they
+ * cannot collide with a system install of the same font. */
+@font-face {
+  font-family: "Zen Easel Inter";
+  src: url("chrome://sine/content/zen-easel/fonts/Inter-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Zen Easel Inter";
+  src: url("chrome://sine/content/zen-easel/fonts/Inter-Bold.ttf") format("truetype");
+  font-weight: 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Zen Easel Nunito";
+  src: url("chrome://sine/content/zen-easel/fonts/Nunito-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Zen Easel Nunito";
+  src: url("chrome://sine/content/zen-easel/fonts/Nunito-Bold.ttf") format("truetype");
+  font-weight: 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Zen Easel Nunito";
+  src: url("chrome://sine/content/zen-easel/fonts/Nunito-Italic.ttf") format("truetype");
+  font-style: italic;
+  font-display: swap;
+}
+/* Variable cuts: one file covers the whole weight range. */
+@font-face {
+  font-family: "Zen Easel Garamond";
+  src: url("chrome://sine/content/zen-easel/fonts/EBGaramond-VariableFont_wght.ttf") format("truetype-variations");
+  font-weight: 400 800;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Zen Easel Garamond";
+  src: url("chrome://sine/content/zen-easel/fonts/EBGaramond-Italic-VariableFont_wght.ttf") format("truetype-variations");
+  font-weight: 400 800;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Zen Easel Inconsolata";
+  src: url("chrome://sine/content/zen-easel/fonts/Inconsolata-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Zen Easel Inconsolata";
+  src: url("chrome://sine/content/zen-easel/fonts/Inconsolata-Bold.ttf") format("truetype");
+  font-weight: 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Zen Easel Space Mono";
+  src: url("chrome://sine/content/zen-easel/fonts/SpaceMono-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Zen Easel Space Mono";
+  src: url("chrome://sine/content/zen-easel/fonts/SpaceMono-Bold.ttf") format("truetype");
+  font-weight: 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Zen Easel Space Mono";
+  src: url("chrome://sine/content/zen-easel/fonts/SpaceMono-Italic.ttf") format("truetype");
+  font-style: italic;
+  font-display: swap;
+}
+
+/* ---------------------------------------------------------- capture overlay */
+
+.zen-easel-capture-overlay {
+  position: fixed;
+  z-index: 2147483646;
+  cursor: crosshair;
+  background: rgba(0, 0, 0, 0.28);
+  /* The dim is moved onto the selection rectangle's outset shadow once a drag
+     starts, so the region being chosen stays at full brightness. */
+  transition: background 90ms ease-out;
+}
+
+.zen-easel-capture-overlay.is-selecting {
+  background: transparent;
+}
+
+.zen-easel-capture-rect {
+  position: absolute;
+  border: 1px solid rgba(255, 255, 255, 0.95);
+  box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.28);
+  pointer-events: none;
+}
+
+.zen-easel-capture-hint {
+  position: absolute;
+  top: 22px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 8px 15px;
+  border-radius: 999px;
+  background: rgba(20, 20, 22, 0.88);
+  color: #fff;
+  font: message-box;
+  font-size: 13px;
+  white-space: nowrap;
+  pointer-events: none;
+  transition: opacity 120ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .zen-easel-capture-overlay,
+  .zen-easel-capture-hint {
+    transition: none;
+  }
+}

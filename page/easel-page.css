@@ -1,0 +1,33 @@
+/* Zen Easel — page chrome for about:easel.
+ *
+ * Just enough to make the page a full-bleed surface for the <zen-easel> element. The
+ * easel's own styling is in ZenEasel.css, which the element loads into its shadow root
+ * exactly as it did when this was an overlay.
+ *
+ * The page never paints a ground of its own. Every board is a *tint* — the presets in
+ * objects.uc.js all carry an alpha — so anything painting between the board and Zen's
+ * window would cancel the transparency the tints are built on. The board's colour is
+ * painted once, by .easel-viewport, and this page stays out of the way.
+ *
+ * This only shows the window through where browser.tabs.allow_transparent_browser is
+ * enabled — Zen's transparency themes set it. Without that flag the page composites
+ * against the window's own colour instead, which still looks deliberate.
+ */
+
+:root {
+    color-scheme: light dark;
+    height: 100%;
+}
+
+body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    background: transparent;
+}
+
+zen-easel {
+    display: block;
+    position: absolute;
+    inset: 0;
+}
