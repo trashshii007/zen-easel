@@ -186,6 +186,118 @@
 .easel-switcher.is-open { background: var(--easel-active-bg); }
 .easel-close { font-size: 14px; }
 
+/* -------------------------------------------------------------- live census */
+
+/* The count of live cards running in this window, and the only way to reach one whose
+   board is not open. Anchored so its panel hangs off the right-hand end of the topbar,
+   where the button is — the switcher's list opens from the left. */
+.easel-live-census-wrap { position: relative; display: inline-flex; }
+
+/* The wrapper is a flex item of .easel-topbar-actions, which has a gap — so leaving it in
+   the flow with a hidden button still costs the gap on either side of nothing. A board
+   with no live cards should be spaced exactly as it was before this control existed. */
+.easel-live-census-wrap:not(:has(> .easel-live-census:not([hidden]))) { display: none; }
+
+.easel-live-census {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--easel-accent, var(--zen-primary-color, #2b5fd9));
+  font: inherit;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.easel-live-census:hover { background: var(--easel-hover-bg); }
+.easel-live-census.is-open { background: var(--easel-active-bg); }
+.easel-live-census[hidden] { display: none; }
+
+.easel-live-panel {
+  position: absolute;
+  top: 34px;
+  right: 0;
+  min-width: 260px;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--easel-panel-border);
+  border-radius: 14px;
+  background: var(--easel-panel);
+  box-shadow: var(--easel-shadow);
+  backdrop-filter: blur(20px) saturate(140%);
+  z-index: 10;
+  animation: easel-pop 150ms var(--easel-ease) both;
+  transform-origin: top right;
+}
+.easel-live-panel[hidden] { display: none; }
+
+.easel-live-panel-head {
+  padding: 6px 8px 8px;
+  color: var(--easel-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.easel-live-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+}
+.easel-live-row:hover { background: var(--easel-hover-bg); }
+
+.easel-live-row-text { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.easel-live-row-url {
+  font-size: 13px;
+  color: var(--easel-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.easel-live-row-board {
+  font-size: 11px;
+  color: var(--easel-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.easel-live-row-stop {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--easel-muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.easel-live-row-stop:hover { background: var(--easel-hover-bg); color: var(--easel-text); }
+
+.easel-live-stop-all {
+  width: 100%;
+  margin-top: 4px;
+  padding: 8px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--easel-danger, #d13438);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.easel-live-stop-all:hover { background: var(--easel-hover-bg); }
+
 /* ---------------------------------------------------------------- easel list */
 
 .easel-list {
@@ -305,6 +417,14 @@
 .easel-canvas {
   position: absolute;
   inset: 0;
+  /* The canvases are sized in pixels by the renderer and may be larger than the viewport
+     — see its resize(), which grows the backing stores in steps and never shrinks them
+     mid-drag. The overflow is meant to be clipped by .easel-viewport, so the box is
+     anchored at the origin explicitly rather than left to the over-constrained
+     left/right resolution, which would anchor it to the other edge under `dir: rtl`
+     and put the whole board out by the difference. */
+  right: auto;
+  bottom: auto;
   /* The viewport owns every pointer event. Letting the canvases take them would make
      e.target a canvas and break the menu/editor checks in _onPointerDown. */
   pointer-events: none;

@@ -8,6 +8,15 @@ Easels live at **`about:easel`**, in an ordinary tab — not as an overlay float
 whatever page you happened to be on. They get a tab title and favicon, `Ctrl+W` closes
 one, and a restored session reopens the board you were looking at.
 
+**One tab per board.** Opening a board focuses its tab if it already has one and makes a
+new tab if it does not, so several can be open at once and two can be split against each
+other. This replaces an earlier "one easel at a time" rule, where the switcher swapped the
+document inside a single shared tab. That rule existed because two easel pages used to
+race each other on `index.json`, and because everything that looked up "the easel tab" by
+walking `gBrowser.tabs` took the first one it found. Both are gone: every write now goes
+through `background/store.sys.mjs`, a per-process singleton with one serialised queue, and
+the live-tile host resolves tabs by easel id and keeps a layer per board.
+
 Everything stays on your machine. Easels are plain JSON and PNG files inside your Zen
 profile that you can read, back up, or delete with any file manager. The one exception
 is **live web cards**, which are opt-in per card and documented below — with them off,
@@ -295,15 +304,49 @@ This is the one part of the mod that touches the network, so it is worth being p
 
 - **It is opt-in per card**, behind a one-time explanation, and remembered per object.
 - **Cards always open as screenshots**, every time, whatever is saved. Live is entered
-  only when asked, and at most three at once (`live.max-tiles`).
+  only when asked, and at most twelve at once by default (`live.max-tiles`; `0` for no
+  cap). The cap is per *window*, not per board.
 - **A live card loads the site with your normal cookies and session**, exactly as a tab
   would — that is what makes a logged-in dashboard show your data rather than a login
   screen. Set `zen.easel.live.private` or point `live.container` at a container if you
   would rather a board did not carry your session around.
-- Cards tear down when they scroll out of view, and *all* of them tear down when the
-  easel tab is backgrounded, so a board left open in another tab is not a board still
-  running three websites.
+- **A live card keeps running.** Scrolling it off the board, opening another easel,
+  switching tabs and minimising the window all stop it *painting*; none of them stop it
+  running. That is the point — a dashboard is no use if it is stale by the time you look
+  back at it — but it does mean a board you are not looking at can still be running
+  websites, which is what the count in the top bar is for.
+- **A card out of sight for thirty minutes stops on its own**
+  (`live.idle-timeout-min`, `0` to disable). The cap bounds how *many* run at once; this
+  bounds how long one runs unattended, which is a different problem — you can sit well
+  under the cap and still have a logged-in dashboard holding a content process open
+  because you scrolled past it before lunch. Only invisible cards age: one on screen is
+  being looked at and one making sound is being listened to, so neither times out however
+  long it has been there. A card that does times out reverts to its screenshot, and a
+  click starts it again — nothing is lost.
+- **Audio follows what a background tab does**: a card that was already playing keeps
+  playing when it stops painting, and a silent one is muted so nothing can start talking
+  from a board you cannot see. **Mute this card** in the right-click menu overrides that
+  per card and is saved with the board.
 - `zen.easel.live.enabled = false` is a hard off switch: no `<browser>` is ever created.
+
+### Stopping one
+
+Three ways, because a card whose board is closed cannot be reached by the first:
+
+- The **❚❚** badge in the card's own strip — for a web tile too, which never used to have
+  one because it was always stopped for you.
+- The **live count** in the top bar. It reports everything running in the window,
+  including cards on boards you do not have open; click it to stop one, or **Stop all
+  live cards**. This is the only route to a card whose board is closed.
+- Closing a board's tab stops that board's cards, and so does reloading it with `Ctrl+R`
+  — a reload starts the board over, websites included, rather than readopting the content
+  processes it had a moment earlier. Deleting a board stops its cards, and closing Zen
+  stops everything.
+
+The line between the two behaviours is *the page went away* versus *you looked elsewhere*.
+Switching tabs, opening another board and minimising the window are the second kind and
+stop only the pixels. Unloading the page — closing its tab, reloading it, navigating it
+away — is the first, and takes the websites with it.
 
 Inside a live card, scrolling and text selection are disabled — it is a fixed view of
 one region, and letting it scroll would just break the crop. Clicking a link opens a
@@ -481,7 +524,9 @@ In Zen's mod preferences, or directly in `about:config`:
 | `zen.easel.snap` | `guides` | `guides` (to other objects), `grid`, or `none`. Hold `Alt` to suppress |
 | `zen.easel.grid-size` | `24` | canvas pixels, for `snap: grid` |
 | `zen.easel.live.enabled` | `true` | off means no easel ever loads a website |
-| `zen.easel.live.max-tiles` | `3` | how many cards may be live at once |
+| `zen.easel.live.max-tiles` | `12` | how many cards may be live at once, per window; `0` for no cap |
+| `zen.easel.live.idle-timeout-min` | `30` | stop a card after this long out of sight; `0` for never |
+| `zen.easel.live.reveal-delay-ms` | `140` | pause before showing live cards again after a tab switch; `0` for none |
 | `zen.easel.live.private` | `false` | load live cards in a private session |
 | `zen.easel.live.container` | `0` | container ID for live cards; `0` is your normal session |
 | `zen.easel.live.allow-http` | `false` | allow live cards over plain http |
@@ -518,6 +563,7 @@ window still open.
 | `modules-host/capture-host.uc.js` | region picker over Zen's chrome, `drawSnapshot` |
 | `modules-host/screenshot-hook.uc.js` | "Move to easel" inside Zen's screenshot preview |
 | `modules-host/live-host.uc.js` | the live tiles themselves — `<browser>` elements, the layer over the easel tab, load watching |
+| `modules-host/split-resize.uc.js` | not an easel feature: fixes a Zen split-divider bug where mouse events from an in-process about: page arrive in that page's coordinates, so the divider snaps and the panes strobe. Behind a setting, and meant to be deleted once Zen fixes it upstream |
 
 **In the page** — `about:easel` itself, a system-principal chrome document in the parent
 process.
@@ -703,9 +749,37 @@ Worth stating plainly rather than leaving implied:
   switch in Gecko, so a live card retains those capabilities. A live card runs its scripts
   from the moment it loads — an earlier version left JavaScript off until the card was
   clicked into, but a card whose scripts are off is not live in any sense a person would
-  recognise. What bounds the exposure instead is that live is opt-in per card, capped at
-  three at once, torn down when a card scrolls out of view, and torn down entirely when the
-  easel tab is backgrounded.
+  recognise.
+
+  This used to be bounded largely by impermanence: cards were capped at three, torn down
+  when they scrolled out of view, and torn down entirely when the easel tab went to the
+  background. Making them persist removes two of those three, and it is worth being blunt
+  that this widens the exposure rather than pretending the replacement is equivalent. A
+  card can now be loaded with your session, running scripts, on a board you are not
+  looking at, in a window you have minimised.
+
+  What bounds it instead:
+
+  - Live is still opt-in per card, behind the same one-time explanation, and cards still
+    always open as screenshots — nothing goes live because a file said so.
+  - The cap is now per window rather than per board, which is a stricter reading of the
+    same number, and it is enforced before the `<browser>` is created.
+  - **A card out of sight for thirty minutes stops itself.** Persistence is for the board
+    you came back to, not the one you forgot about, and this is what keeps "until you stop
+    it" from meaning "until you quit Zen" in practice.
+  - Every running card is **counted and reachable**. The top-bar census lists everything
+    alive in the window with the board it belongs to, and **Stop all live cards** returns
+    that to zero. Nothing can run that the user cannot see and stop, which is the property
+    the old teardown provided by accident and this provides on purpose.
+  - Closing the easel tab, or the window, stops everything.
+  - Background cards are muted unless they were already playing, so nothing can make noise
+    from a board with no tab to trace it to.
+
+  One genuine cost with no mitigation: a live card keeps its content process at foreground
+  priority for as long as it runs, because `ProcessPriorityManager` keys off the active
+  `BrowserParent` and the tile is deliberately kept active. N background cards are N
+  processes the OS will not deprioritise. That is the price of the feature working at all,
+  and the cap is the only lever on it.
 
 ---
 

@@ -27,6 +27,16 @@
             this.root = root;              // header.easel-topbar
             this.el = window.ZenEaselUtil.el;
             this._open = false;
+            // The census popup, and the outside-click listener the two popups share. Both
+            // real booleans from the start: _syncOutsideListener compares its wanted state
+            // against what is registered, and `undefined` on one side of that comparison
+            // makes the first call decide by accident rather than by the flags.
+            this._censusOpen = false;
+            this._outsideBound = false;
+            // Last count written to the census button. Null rather than 0 so that the first
+            // update writes the button even when nothing is running, which is what puts it
+            // into its hidden state.
+            this._lastLiveCount = null;
             this._onOutsidePointerDown = this._onOutsidePointerDown.bind(this);
         }
 
@@ -55,7 +65,25 @@
             // screenshot preview ("Move to easel") or from the capture shortcut, both
             // of which are reachable from the page you are actually capturing — which
             // a button inside the easel never is.
+            // The live-tile census. Hidden whenever nothing is running, so a board with no
+            // live cards looks exactly as it did.
+            //
+            // It reports the *window* total rather than this board's, and that is the whole
+            // reason it exists: a tile keeps running when its board is closed, and the pause
+            // badge goes with the board. Without something here, a site left running on a
+            // board you are not looking at has no reachable off switch at all.
+            this._census = this.el("button", {
+                className: "easel-live-census",
+                type: "button",
+                hidden: "true",
+                title: "Live web cards running in this window",
+                onclick: e => { e.stopPropagation(); this.toggleCensus(); }
+            });
+            this._censusPanel = this.el("div", { className: "easel-live-panel", hidden: "true" });
+
             const actions = this.el("div", { className: "easel-topbar-actions" }, [
+                this.el("div", { className: "easel-live-census-wrap" },
+                    [this._census, this._censusPanel]),
                 this._zoom,
                 this.el("button", {
                     className: "easel-topbar-button easel-close",
@@ -93,6 +121,126 @@
             this._zoom.textContent = `${percent}%`;
         }
 
+        /* ---------------------------------------------------------- live census */
+
+        // Same shape as updateZoom, and called from the same painted frame: compared
+        // before writing, because an unconditional assignment per frame is a layout
+        // invalidation for a number that changes a handful of times a session.
+        updateLiveCount() {
+            if (!this._census) return;
+            const total = (this.host.bridge?.liveCount(this.host.store.current?.id) ?? { total: 0 }).total;
+            if (total === this._lastLiveCount) return;
+            this._lastLiveCount = total;
+
+            this._census.textContent = `◉ ${total}`;
+            if (total) this._census.removeAttribute("hidden");
+            else this._census.setAttribute("hidden", "true");
+
+            if (!total) this.closeCensus();
+            else if (this._censusOpen) this._renderCensus();
+        }
+
+        toggleCensus() {
+            this._censusOpen ? this.closeCensus() : this.openCensus();
+        }
+
+        openCensus() {
+            if (this._censusOpen) return;
+            this._censusOpen = true;
+            this._censusPanel.removeAttribute("hidden");
+            this._census.classList.add("is-open");
+            this._renderCensus();
+            this._syncOutsideListener();
+        }
+
+        closeCensus() {
+            if (!this._censusOpen) return;
+            this._censusOpen = false;
+            this._censusPanel.setAttribute("hidden", "true");
+            this._census.classList.remove("is-open");
+            this._syncOutsideListener();
+        }
+
+        // One listener, two popups. Registered while either is open and removed only when
+        // both are closed — the switcher and the census share the handler, so whichever
+        // closed last must not take the listener the other is still relying on.
+        _syncOutsideListener() {
+            const wanted = !!(this._open || this._censusOpen);
+            if (wanted === this._outsideBound) return;
+            this._outsideBound = wanted;
+            const root = this.host.shadowRoot;
+            if (wanted) root.addEventListener("pointerdown", this._onOutsidePointerDown, true);
+            else root.removeEventListener("pointerdown", this._onOutsidePointerDown, true);
+        }
+
+        _renderCensus() {
+            const bridge = this.host.bridge;
+            const rows = bridge?.liveList(this.host.store.current?.id) ?? [];
+            const current = this.host.store.current;
+
+            const children = [this.el("div", {
+                className: "easel-live-panel-head",
+                textContent: rows.length === 1 ? "1 live card" : `${rows.length} live cards`
+            })];
+
+            for (const row of rows) {
+                // The board's title, not its id — and the id is all the host can know, so
+                // it is resolved here against the library's own index.
+                const board = row.onThisBoard && current
+                    ? current.title
+                    : (this._entryTitle(row.easelId) || "another easel");
+
+                children.push(this.el("div", { className: "easel-live-row" }, [
+                    this.el("div", { className: "easel-live-row-text" }, [
+                        this.el("span", {
+                            className: "easel-live-row-url",
+                            textContent: this._hostOf(row.url)
+                        }),
+                        this.el("span", {
+                            className: "easel-live-row-board",
+                            textContent: board
+                        })
+                    ]),
+                    this.el("button", {
+                        className: "easel-live-row-stop",
+                        type: "button",
+                        title: "Stop this card",
+                        textContent: "✕",
+                        onclick: () => {
+                            bridge?.liveUnmount(row.easelId, row.objectId);
+                            // The page's own model only knows this board's tiles.
+                            if (row.onThisBoard) this.host.live?.forget(row.objectId);
+                            this.updateLiveCount();
+                            this._renderCensus();
+                        }
+                    })
+                ]));
+            }
+
+            children.push(this.el("button", {
+                className: "easel-live-stop-all",
+                type: "button",
+                textContent: "Stop all live cards",
+                onclick: () => {
+                    bridge?.liveStopAll();
+                    this.closeCensus();
+                    this.updateLiveCount();
+                }
+            }));
+
+            this._censusPanel.replaceChildren(...children);
+        }
+
+        _entryTitle(easelId) {
+            const entry = this.host.store.listEasels().find(e => e.id === easelId);
+            return entry ? entry.title : null;
+        }
+
+        // Just the host, because a full URL in a narrow popup is all path and no meaning.
+        _hostOf(url) {
+            try { return new URL(url).host || url; } catch (e) { return url || "…"; }
+        }
+
         /* ----------------------------------------------------------- the list */
 
         toggleList() {
@@ -110,7 +258,7 @@
                 .catch(e => console.error("[zen-easel]", e));
             this._list.removeAttribute("hidden");
             this._switcher.classList.add("is-open");
-            this.host.shadowRoot.addEventListener("pointerdown", this._onOutsidePointerDown, true);
+            this._syncOutsideListener();
         }
 
         closeList() {
@@ -118,11 +266,18 @@
             this._open = false;
             this._list.setAttribute("hidden", "true");
             this._switcher.classList.remove("is-open");
-            this.host.shadowRoot.removeEventListener("pointerdown", this._onOutsidePointerDown, true);
+            this._syncOutsideListener();
         }
 
         _onOutsidePointerDown(e) {
-            if (!this._list.contains(e.target) && !this._switcher.contains(e.target)) this.closeList();
+            if (this._open &&
+                !this._list.contains(e.target) && !this._switcher.contains(e.target)) {
+                this.closeList();
+            }
+            if (this._censusOpen &&
+                !this._censusPanel.contains(e.target) && !this._census.contains(e.target)) {
+                this.closeCensus();
+            }
         }
 
         _renderList() {
@@ -134,7 +289,7 @@
                 this._list.appendChild(this.el("button", {
                     className: `easel-list-item${isCurrent ? " is-current" : ""}`,
                     type: "button",
-                    onclick: () => { this.closeList(); this.switchTo(entry.id); }
+                    onclick: () => this.switchTo(entry.id)
                 }, [
                     this.el("span", { className: "easel-list-name", textContent: entry.title || "Untitled Easel" }),
                     this.el("span", { className: "easel-list-when", textContent: formatWhen(entry.updatedAt) })
@@ -160,35 +315,46 @@
 
         /* --------------------------------------------------------- operations */
 
+        // Opens the board in its own tab rather than replacing this one's.
+        //
+        // Boards used to share a tab, so picking one from the switcher swapped the document
+        // underneath you — which meant you could never have two open, reorder them, or put
+        // two side by side in a split. A tab each costs nothing extra: the store's write
+        // queue is a per-process singleton, so two pages cannot race on index.json, and the
+        // live-tile host keys its layers by easel id rather than assuming one board.
+        //
+        // The chrome window owns this because it is the only side that can focus or open a
+        // tab; if that board is already open somewhere, it focuses it instead.
         async switchTo(id) {
             const current = this.host.store.current;
             if (current && current.id === id) return;
+            this.closeList();
             try {
-                const doc = await this.host.store.open(id);
-                if (!doc) {
-                    // open() drops entries whose file has gone missing, so the list
-                    // needs rebuilding even though nothing opened.
+                // Checked here rather than left to the new tab's own boot, because this page
+                // has the switcher list open and can say so directly — a tab that opens onto
+                // a missing easel just silently falls back to another board.
+                const entries = await this.host.store.refreshList();
+                if (!entries.some(e => e.id === id)) {
                     this.refresh();
-                    // Said out loud: whatever asked for this easel is about to carry on
-                    // with a different one still open, and a capture quietly landing on
-                    // the wrong board is worse than being told the right one is gone.
                     this.host.toast("That easel no longer exists");
                     return;
                 }
-                this.host.canvas.setDocument(doc);
-                this.refresh();
+                this.host.bridge?.openEasel(id);
             } catch (e) {
-                console.error("[zen-easel] could not switch easel:", e);
+                console.error("[zen-easel] could not open easel:", e);
             }
         }
 
+        // A new board gets a new tab, for the same reason switching does — making one should
+        // not close the one you were working on. Created through the chrome window rather
+        // than this page's store so the document exists on disk before the tab is asked for,
+        // which is what lets the tab open straight onto it with nothing to await.
         async createNew() {
             const title = this._prompt("New easel", "Name this easel:", "Untitled Easel");
             if (title === null) return;
+            this.closeList();
             try {
-                const doc = await this.host.store.create(title.trim() || "Untitled Easel");
-                this.host.canvas.setDocument(doc);
-                this.refresh();
+                await this.host.bridge?.createEasel(title.trim() || "Untitled Easel");
             } catch (e) {
                 console.error("[zen-easel] could not create easel:", e);
             }
@@ -223,12 +389,23 @@
             }
             if (!confirmed) return;
 
-            await this.host.store.remove(doc.id);
-            // Deleting the last easel leaves nothing open; openLast makes a fresh one
-            // rather than dropping the user onto a dead canvas.
-            const next = await this.host.store.openLast();
-            this.host.canvas.setDocument(next);
-            this.refresh();
+            // Stopped explicitly, and by id captured before the board goes: a tile survives
+            // its board being closed on purpose, so that switching away and back finds it
+            // still running — but a board that has been *deleted* is never coming back, and
+            // nothing else would ever reach those tiles again. The host's orphan check only
+            // covers the easel tab going away, which is a different thing.
+            const easelId = doc.id;
+            try { this.host.bridge?.liveUnmountBoard(easelId); } catch (e) { console.error(e); }
+
+            await this.host.store.remove(easelId);
+
+            // The tab goes with the board. Falling back to another easel in place was right
+            // when boards shared one tab, but now each has its own — and the board this
+            // would fall back to is quite likely open in a tab already, which would leave
+            // two tabs showing the same easel and the live host binding its tiles to
+            // whichever it found first. Closing is also simply what a tab whose contents
+            // have been deleted should do.
+            this.host.requestClose();
         }
 
         // Zen renders these prompts inside the same chrome document, so focus lands in
@@ -246,6 +423,7 @@
 
         destroy() {
             this.closeList();
+            this.closeCensus();
         }
     }
 
