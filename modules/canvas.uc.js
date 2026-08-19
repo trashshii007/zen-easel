@@ -20,6 +20,12 @@
 (function () {
     if (window.ZenEaselCanvas) return;
 
+    // How long the viewport has to stop moving before a shrink that skipped its repaint
+    // gets one anyway. Nothing on screen is waiting for it — see the resize observer — so
+    // this only has to be short enough that the live layer's offscreen test is not left a
+    // whole gesture behind.
+    const RESIZE_SETTLE_MS = 80;
+
     const MIN_ZOOM = 0.1;
     const MAX_ZOOM = 4;
     const ZOOM_STEP = 1.15;
@@ -118,6 +124,7 @@
             this._onKeyDown = this._onKeyDown.bind(this);
             this._onPaste = this._onPaste.bind(this);
             this._pasteFallbackTimer = null;
+            this._resizeSettleTimer = null;
 
             this.root.addEventListener("pointerdown", this._onPointerDown);
             this.root.addEventListener("pointermove", this._onPointerMove);
@@ -143,13 +150,57 @@
 
             if (typeof ResizeObserver === "function") {
                 this._resizeObserver = new ResizeObserver(() => {
-                    if (!this.renderer.resize()) return;
+                    const resized = this.renderer.resize();
+                    if (!resized) return;
+
                     // In Arc's verticallyScrolling mode the document *is* the window width,
                     // so a resize relays the board out rather than just re-clamping it.
-                    this._reflowToCanvasWidth();
+                    const reflowed = this._reflowToCanvasWidth();
+
                     // A narrower window changes where the page edges fall.
+                    const view = this.view;
+                    const before = { zoom: view.zoom, panX: view.panX, panY: view.panY };
                     this._clampView();
-                    this._paintViewport();
+                    const moved = view.zoom !== before.zoom ||
+                        view.panX !== before.panX || view.panY !== before.panY;
+
+                    // A resize that only moved the viewport *within* the canvas already
+                    // drawn is not painted at all — nothing cleared, nothing redrawn,
+                    // nothing reallocated. In a split-divider drag that is every frame but
+                    // the first, in both directions.
+                    //
+                    // Repainting was the whole of the risk. The flicker survived painting in
+                    // this callback rather than scheduling it, and survived dropping the
+                    // per-frame reallocation of the backing stores; what is left is a frame
+                    // composited after the canvas was emptied and before the drawing landed,
+                    // which is a race this side does not get to see, let alone win. So it is
+                    // not raced. It is made unnecessary.
+                    //
+                    // What makes it unnecessary: the board is drawn from the viewport's own
+                    // origin at a scale a resize does not change, out to the edge of a
+                    // backing store that is deliberately larger than the viewport and only
+                    // ever grows (renderer.resize, _viewportBounds). Every pixel the
+                    // viewport can move over is therefore already the pixel that belongs
+                    // there — shrinking shows less of the picture, growing shows more of it,
+                    // and .easel-viewport's overflow:hidden was doing the clipping either
+                    // way.
+                    //
+                    // The three conditions are what keep that true rather than nearly true:
+                    // a reallocation has just emptied the canvas, and a reflow or a clamped
+                    // view changes what belongs on it. Any of them and the repaint has to be
+                    // now, on this frame — observations are delivered after the frame's
+                    // animation callbacks and before it composites, so scheduling one would
+                    // compose exactly the empty frame this comment is about. See repaintNow.
+                    if (resized.reallocated || reflowed || moved) {
+                        this.repaintNow();
+                        return;
+                    }
+
+                    // Nothing on screen is waiting, but _paintNow also drives the things
+                    // that read the viewport's size — the live layer's offscreen test above
+                    // all — and those should not sit out a whole gesture. One paint once it
+                    // stops moving, when a redraw is safe again because nothing is resizing.
+                    this._scheduleResizeSettle();
                 });
                 this._resizeObserver.observe(this.root);
             }
@@ -157,6 +208,7 @@
 
         destroy() {
             this._paint.cancel();
+            if (this._resizeSettleTimer) window.clearTimeout(this._resizeSettleTimer);
             if (this._resizeObserver) this._resizeObserver.disconnect();
             this.root.removeEventListener("pointerdown", this._onPointerDown);
             this.root.removeEventListener("pointermove", this._onPointerMove);
@@ -177,6 +229,13 @@
 
         setDocument(doc) {
             this.doc = doc;
+            // Before anything below can schedule a frame — renderer.resize() and
+            // _clampView() both can. sync() runs from the paint loop and sweeps tiles whose
+            // object is not on the board, so a paint landing between "this.doc changed" and
+            // "live knows which board it is" would see every one of the outgoing board's
+            // tiles as an orphan and stop them. After `this.doc = doc`, though: attach reads
+            // the object index to decide what it can adopt.
+            if (this.host.live) this.host.live.attach(doc ? doc.id : null);
             this.selection.clear();
             this._undo = [];
             this._redo = [];
@@ -264,6 +323,12 @@
             this._index = null;
         }
 
+        // Does this board still have an object with this id? Public because the live layer
+        // asks it once per tile on every painted frame, and the alternative it used was
+        // building a Set of every object id on the board to answer a question about at most
+        // a handful of tiles — hundreds of strings allocated per frame, in the paint path.
+        hasObject(id) { return !!this._byId(id); }
+
         _selected() { return [...this.selection].map(id => this._byId(id)).filter(Boolean); }
 
         _touch() {
@@ -281,7 +346,7 @@
             if (!live) return false;
             if (!live.isLive(obj.id) && !live.canGoLive(obj)) return false;
 
-            const rect = this.renderer.webcardBadgeRect(obj);
+            const rect = this.renderer.liveBadgeRect(obj);
             if (!rect) return false;
 
             // Same local-frame trick the object hit test uses: the badge is drawn inside
@@ -478,6 +543,34 @@
         // Kept because the store calls it when a late asset finishes loading.
         requestRender() { this.invalidate(); }
 
+        // A repaint that has to land on *this* frame rather than the next one.
+        //
+        // For callers that have just emptied the canvases rather than merely changed what
+        // ought to be on them — anything that assigns canvas.width. The scheduled path is a
+        // frame late by construction, and a frame in which the board has been cleared and
+        // not yet redrawn is a frame with nothing on it: composited, that is the board
+        // blinking out. Once is a flicker; once a frame for the length of a drag is the
+        // board simply being gone until you let go.
+        //
+        // The pending frame is dropped rather than left to run, since _paintNow reads
+        // current state and has just drawn whatever it was scheduled for.
+        repaintNow() {
+            this._staticDirty = true;
+            this._paint.cancel();
+            this._paintNow();
+        }
+
+        // The catch-up paint for a shrink that correctly did nothing. Debounced, so a drag
+        // — where every frame is a new size — gets one of these at the end rather than one
+        // per frame, which is the entire point of having skipped them.
+        _scheduleResizeSettle() {
+            if (this._resizeSettleTimer) window.clearTimeout(this._resizeSettleTimer);
+            this._resizeSettleTimer = window.setTimeout(() => {
+                this._resizeSettleTimer = null;
+                this.repaintNow();
+            }, RESIZE_SETTLE_MS);
+        }
+
         render() { this._paintNow(); }
 
         _paintNow() {
@@ -523,7 +616,12 @@
             // Live web cards are DOM, not canvas, so they need the same transform applied
             // to their layer — on this frame, or they would lag the board by one.
             if (this.host.live) this.host.live.sync();
-            if (this.host.library) this.host.library.updateZoom();
+            if (this.host.library) {
+                this.host.library.updateZoom();
+                // Both compare before writing, so this is a number read per frame rather
+                // than a layout invalidation per frame.
+                this.host.library.updateLiveCount();
+            }
         }
 
         _overlayState() {
@@ -752,22 +850,24 @@
         // remember the new width. Arc's field names are the design — currentWidth against
         // lastLaidOutAtCanvasWidth — and coordinates stay in the units they were written
         // in, so nothing has to be migrated and the fixed mode is untouched.
+        // Answers whether it rescaled anything, because its caller has to know whether the
+        // pixels already on the canvas are still the right ones.
         _reflowToCanvasWidth() {
-            if (!this.doc || !this.reflowing) return;
+            if (!this.doc || !this.reflowing) return false;
 
             const width = this.renderer.width;
-            if (!width) return;
+            if (!width) return false;
 
             const previous = this.doc.lastLaidOutAtCanvasWidth;
             if (!previous) {
                 this.doc.lastLaidOutAtCanvasWidth = width;
-                return;
+                return false;
             }
 
             const factor = width / previous;
             // Sub-pixel resizes are noise, and rescaling on each of them would accumulate
             // rounding error across a drag of the window edge.
-            if (!Number.isFinite(factor) || Math.abs(factor - 1) < 0.001) return;
+            if (!Number.isFinite(factor) || Math.abs(factor - 1) < 0.001) return false;
 
             for (const obj of this.doc.objects) {
                 obj.x *= factor;
@@ -800,6 +900,7 @@
                 if (obj.type === "text") obj.h = this.renderer.measureTextHeight(obj);
             }
             this._touch();
+            return true;
         }
 
         /* ------------------------------------------------------------- palette */
@@ -1355,12 +1456,18 @@
             // The card's footer strip is deliberately not covered by the tile, so
             // dragging a live card by its title bar still moves it, and Escape hands the
             // pointer back.
-            // The play/pause control in the card's title strip, checked before anything
-            // else that a click on a card can mean. It sits in the footer precisely so it
-            // stays reachable once the tile covers the art — without it, turning a card
-            // back into a picture means finding the context menu.
-            if (hit.type === "webcard" && !e.shiftKey && !e.ctrlKey &&
-                this._hitLiveBadge(hit, world)) {
+            // The play/pause control, checked before anything else that a click on a card
+            // can mean — including, for a web tile, the plain click that would otherwise
+            // load it. It sits in a canvas-drawn strip precisely so it stays reachable once
+            // the tile covers the rest; without it, stopping a card means finding the
+            // context menu.
+            //
+            // Both types, and for a web tile that is not optional: nothing else can stop
+            // one. It has no screenshot to fall back to, so it was never given a badge, and
+            // it used to be stopped only by scrolling it off or backgrounding the tab —
+            // neither of which does anything now.
+            if ((hit.type === "webcard" || hit.type === "webBrowser") &&
+                !e.shiftKey && !e.ctrlKey && this._hitLiveBadge(hit, world)) {
                 this.select([hit.id]);
                 this._toggleLive(hit);
                 return;

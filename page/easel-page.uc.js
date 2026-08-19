@@ -129,7 +129,31 @@
                 // ?easel=<id> is what makes a restored tab come back to the easel it was
                 // showing rather than to whichever was last touched in some other window.
                 const wanted = new URLSearchParams(window.location.search).get("easel");
-                const doc = (wanted && await this.store.open(wanted)) || await this.store.openLast();
+                let doc = (wanted && await this.store.open(wanted)) || await this.store.openLast();
+
+                // Settled before the document is handed to the canvas, and so before
+                // anything has attached tiles, refreshed the library or written a thumbnail.
+                //
+                // A board may only be open in one tab. Duplicate Tab and a restored session
+                // both reach this point holding a board another tab already has, and two
+                // pages on one document is the state the multi-board design assumes away:
+                // the live host binds a board's tiles to whichever tab it finds first, and
+                // whichever page autosaves second discards the other's edits.
+                //
+                // The chrome window is the only side that can see every tab, so it decides.
+                // What to do about a refusal depends on why this page is here, and the two
+                // cases genuinely differ:
+                //
+                //   an explicit ?easel=   somebody asked for *this* board. It is already
+                //                         open, so the tab that has it is focused and this
+                //                         one closes. That is what the ask meant.
+                //   openLast              nobody asked for a board at all — this is the
+                //                         toolbar button or the shortcut, which mean "give
+                //                         me an easel". Closing would make the gesture
+                //                         appear to do nothing but pull focus to another
+                //                         window. A new board is the honest reading.
+                doc = await this._claimOrReplace(doc, !!wanted);
+                if (!doc) return;
 
                 this.canvas.setDocument(doc);
                 this.library.refresh();
@@ -144,6 +168,29 @@
             } catch (e) {
                 console.error("[zen-easel] boot failed:", e);
                 this._showError(e);
+            }
+        }
+
+        // Returns the document this tab may keep, or null when the tab is closing.
+        //
+        // Only one round of this: a board created here is brand new, so no other tab can be
+        // holding it and a second claim could not fail. Recursing would be an invitation to
+        // spin if that ever stopped being true.
+        async _claimOrReplace(doc, explicit) {
+            const browser = window.browsingContext?.embedderElement;
+            if (!doc || !this.bridge || !browser) return doc;
+            if (this.bridge.claimEasel(doc.id, browser)) return doc;
+
+            if (explicit) {
+                this.requestClose();
+                return null;
+            }
+            try {
+                return await this.store.create("Untitled Easel");
+            } catch (e) {
+                console.error("[zen-easel] could not open a second board:", e);
+                this.requestClose();
+                return null;
             }
         }
 
@@ -280,6 +327,7 @@
     class ZenEaselPage {
         constructor() {
             this._onPageHide = this._onPageHide.bind(this);
+            this._onPageShow = this._onPageShow.bind(this);
             this._onVisibility = this._onVisibility.bind(this);
 
             this.element = document.getElementById("zen-easel-page");
@@ -289,6 +337,7 @@
             }
 
             window.addEventListener("pagehide", this._onPageHide);
+            window.addEventListener("pageshow", this._onPageShow);
             document.addEventListener("visibilitychange", this._onVisibility);
 
             // A CSP refusal is not an error anywhere else: the load is simply cancelled,
@@ -319,11 +368,10 @@
             await this.element.capture.addCaptureToDocument(result);
         }
 
-        async switchTo(id) {
-            if (!this.element) return;
-            await this.element._bootPromise;
-            await this.element.library.switchTo(id);
-        }
+        // There is no switchTo() here any more either. It existed so the chrome window
+        // could swap the board inside an already-open tab, and the chrome window stopped
+        // doing that when boards got a tab each — openEasel now focuses or opens the right
+        // tab instead, and library.switchTo asks it to. Nothing was left calling this.
 
         // Called by ZenEaselLiveParent when a right-click lands inside a live card. The
         // coordinates arrive in screen space, which is the one frame of reference both
@@ -349,6 +397,14 @@
             element.tools.showContextMenu(point, obj, element.canvas.toWorld(point.x, point.y));
         }
 
+        // The host has hidden or re-shown this board's whole layer — a tab switch, a split
+        // view change, the window being minimised. The canvas skips a live card's screenshot
+        // on the understanding that a <browser> is covering it, so it has to hear about this
+        // or the board is a set of holes for as long as the layer is down.
+        onLiveBoardPainting(painting) {
+            try { this.element?.live?.setHostPainting(painting); } catch (e) { console.error(e); }
+        }
+
         // The host gave up on a tile — refused, errored, timed out or its process died. The
         // page owns the model, so it has to hear about it: until it does, the canvas keeps
         // leaving a hole where the card used to be painted.
@@ -359,29 +415,51 @@
             if (reason) element.toast(reason);
         }
 
-        // Used by the host when a capture asks for a fresh easel to land on.
-        async createNew(title = "Untitled Easel") {
-            if (!this.element) return;
-            await this.element._bootPromise;
-            const doc = await this.element.store.create(title);
-            this.element.canvas.setDocument(doc);
-            this.element.library.refresh();
-            this.element.onDocumentChanged();
-        }
+        // There is no createNew() here any more. It made a board and swapped it into *this*
+        // tab, which is the one thing a fresh easel must not do now that boards have a tab
+        // each — its only caller, a capture asking for a new easel, would have taken away
+        // the board you were looking at. The chrome window's createEasel() makes the
+        // document first and opens a tab for it; see openWithCapture.
 
         // pagehide is the only guaranteed notification a tab gets, and it cannot await.
         // Handing the serialised document to the background queue is synchronous, and
         // that queue's shutdown blocker owns the guarantee from there.
         _onPageHide() {
             try { this.element?.store?.handOffForUnload(); } catch (e) { console.error(e); }
-            try { this.element?.live?.suspendAll(); } catch (e) { console.error(e); }
+            // detach, not a teardown. The tiles belong to the browser window and outlive this
+            // document by design; what goes away here is the view onto them. If the tab is
+            // genuinely closing rather than reloading, the host's own orphan check notices
+            // within a couple of seconds and stops them.
+            try { this.element?.live?.detach(); } catch (e) { console.error(e); }
         }
 
-        // A backgrounded easel tab has no business keeping remote content processes
-        // alive. This is the cheapest reliable signal and it covers window minimise too.
+        // The other half of _onPageHide, which did not have one.
+        //
+        // detach() leaves the view with no board and _suspended set, and that is correct
+        // for the case it was written for — the document is about to stop existing. But
+        // pagehide also fires for a document that is only being *put away*: navigate off
+        // about:easel and press Back and the same page comes out of the session history
+        // with its script state intact, already visible, so no visibilitychange follows and
+        // nothing else would ever re-attach. The board then renders, saves and edits
+        // normally while every live control silently does nothing — _mount refuses on the
+        // null easelId and sync() returns at its first line.
+        //
+        // Re-attaching is enough to put it right. Whatever was running was stopped on the
+        // way out, so there is nothing to adopt; what this restores is the view's ability to
+        // start something again. Guarded on persisted, because an ordinary first load
+        // arrives here too and setDocument has already attached by then.
+        _onPageShow(event) {
+            if (!event.persisted) return;
+            try { this.element?.live?.foreground(); } catch (e) { console.error(e); }
+        }
+
+        // Backgrounding stops the tiles *painting*. It used to stop them existing, which is
+        // why a board left open in another tab came back to a set of stale screenshots — a
+        // dashboard on an easel should still be a dashboard when you look at it again.
+        // Covers window minimise too, which is the other thing this signal is good for.
         _onVisibility() {
             if (document.hidden) {
-                try { this.element?.live?.suspendAll(); } catch (e) { console.error(e); }
+                try { this.element?.live?.background(); } catch (e) { console.error(e); }
                 // Switching away is the moment a thumbnail is most likely to be wanted and
                 // least likely to be in the way — the next thing you do may well be to open
                 // the library. Unlike pagehide, the page is still alive here, so this can
@@ -389,12 +467,15 @@
                 this.element?.store?.writeThumbnail({ force: true })
                     .catch(e => console.error("[zen-easel] thumbnail failed:", e));
             } else {
-                try { this.element?.live?.resume(); } catch (e) { console.error(e); }
+                // Re-attaches as well as repainting: a tab switch never runs setDocument, so
+                // without this nothing would ever put the view back onto its board.
+                try { this.element?.live?.foreground(); } catch (e) { console.error(e); }
             }
         }
 
         destroy() {
             window.removeEventListener("pagehide", this._onPageHide);
+            window.removeEventListener("pageshow", this._onPageShow);
             document.removeEventListener("visibilitychange", this._onVisibility);
             try { this.element?.teardown(); } catch (e) { console.error(e); }
         }

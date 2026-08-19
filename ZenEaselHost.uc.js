@@ -26,6 +26,7 @@
         ["ZenEaselUtil", "modules/util.uc.js"],
         ["ZenEaselCaptureHost", "modules-host/capture-host.uc.js"],
         ["ZenEaselScreenshotHook", "modules-host/screenshot-hook.uc.js"],
+        ["ZenEaselSplitResize", "modules-host/split-resize.uc.js"],
         ["ZenEaselLiveHost", "modules-host/live-host.uc.js"]
     ];
 
@@ -93,6 +94,13 @@
                 this.screenshotHook = new window.ZenEaselScreenshotHook(this);
                 this.screenshotHook.init();
 
+                // Not an easel feature, and meant to be removable: it stops any about:
+                // page in a split pane flickering while the divider is dragged. Behind the
+                // "Split view" setting, and self-contained — see the header of
+                // split-resize.uc.js.
+                this.splitResize = new window.ZenEaselSplitResize();
+                this.splitResize.install();
+
                 // CustomizableUI is not ready at script-load time on a cold start.
                 this._buttonTimer = setTimeout(() => this._createToolbarButton(), 2000);
                 log("host ready");
@@ -128,27 +136,121 @@
 
         /* ------------------------------------------------------------- the tab */
 
-        // Finds the tab showing a given easel, or any easel tab when id is null.
-        _findEaselTab(easelId = null) {
-            for (const tab of gBrowser.tabs) {
-                const browser = tab.linkedBrowser;
-                if (!browser) continue;
-                let spec = "";
-                try { spec = browser.currentURI ? browser.currentURI.spec : ""; } catch (e) { continue; }
-                if (!spec.startsWith(ABOUT_URL) && !spec.startsWith(CHROME_URL)) continue;
-                if (!easelId) return tab;
+        // Does this address belong to the easel page?
+        //
+        // A bare startsWith would also accept about:easelfoo. Nothing can navigate there
+        // today, but this is what decides whether a tab is treated as a board — and the
+        // live host draws a board's websites over whatever it decides — so the test is
+        // written to mean what it says rather than to be right by accident.
+        _isEaselSpec(spec) {
+            for (const base of [ABOUT_URL, CHROME_URL]) {
+                if (!spec.startsWith(base)) continue;
+                const next = spec.charAt(base.length);
+                if (next === "" || next === "?" || next === "#") return true;
+            }
+            return false;
+        }
 
-                // The page rewrites its own URL as the open easel changes, so the query
-                // string is the authority — but a page that has not booted yet has not
-                // written it, so fall back to asking the controller.
+        // Whether one tab is showing one easel — or any easel, when id is null.
+        //
+        // The query string is the authority because the page rewrites its own URL as the
+        // board changes; a page that has not booted yet has not written it, so the
+        // controller is asked as a fallback.
+        _matchEaselTab(tab, easelId) {
+            const browser = tab.linkedBrowser;
+            if (!browser) return false;
+            let spec = "";
+            try { spec = browser.currentURI ? browser.currentURI.spec : ""; } catch (e) { return false; }
+            if (!this._isEaselSpec(spec)) return false;
+            if (!easelId) return true;
+            try {
+                if (new URL(spec).searchParams.get("easel") === easelId) return true;
+            } catch (e) { }
+            try {
+                if (browser.contentWindow?.gZenEaselPage?.easelId === easelId) return true;
+            } catch (e) { }
+            return false;
+        }
+
+        // The tab showing this easel anywhere in the session, and the window holding it.
+        //
+        // Every browser window, not just this one: "one tab per easel" has to hold across
+        // the session or it does not hold at all. Two windows opening the same board each
+        // get their own page and their own live host, and the two documents then overwrite
+        // each other on autosave — the per-process write queue serialises the writes, which
+        // stops the file being torn, not the second save from discarding the first.
+        //
+        // `exclude` is the browser doing the asking, so a page can ask whether anyone
+        // *else* holds its board without matching itself.
+        _findEaselTabAnywhere(easelId, exclude = null) {
+            let windows;
+            try { windows = Services.wm.getEnumerator("navigator:browser"); } catch (e) { return null; }
+            for (const win of windows) {
+                let tabs;
                 try {
-                    if (new URL(spec).searchParams.get("easel") === easelId) return tab;
-                } catch (e) { }
-                try {
-                    if (browser.contentWindow?.gZenEaselPage?.easelId === easelId) return tab;
-                } catch (e) { }
+                    if (win.closed || !win.gBrowser) continue;
+                    tabs = win.gBrowser.tabs;
+                } catch (e) { continue; }
+                for (const tab of tabs) {
+                    if (exclude && tab.linkedBrowser === exclude) continue;
+                    if (this._matchEaselTab(tab, easelId)) return { win, tab };
+                }
             }
             return null;
+        }
+
+        // Focuses a tab that may not be in this window.
+        _focusEaselTab(hit) {
+            if (!hit) return null;
+            try {
+                hit.win.gBrowser.selectedTab = hit.tab;
+                hit.win.focus();
+            } catch (e) {
+                console.error("[zen-easel] could not focus the easel tab:", e);
+            }
+            return hit.tab;
+        }
+
+        // A booting page asking whether it may keep the board it has settled on.
+        //
+        // Two tabs on one easel is the state the whole multi-board design assumes away.
+        // _easelBrowserFor takes the first tab it finds, so one board's websites are drawn
+        // over the other tab; and the two pages hold separate in-memory copies of the same
+        // document, so whichever autosaves second silently discards the other's edits.
+        //
+        // openEasel will not create that state, but openEasel is not the only way in.
+        // Duplicate Tab, a restored session that already contained a duplicate, and a
+        // session restore that races two windows onto the last-opened board all arrive
+        // without passing through it. So the invariant is enforced where it can actually be
+        // checked — by the page, once it knows which board it is on. The newcomer closes
+        // and the existing tab is focused, which is what whoever asked for this board
+        // wanted either way.
+        claimEasel(easelId, browser) {
+            if (!easelId || !browser) return true;
+            const other = this._findEaselTabAnywhere(easelId, browser);
+            if (!other) return true;
+            log("that easel is already open in another tab; focusing it");
+            this._focusEaselTab(other);
+            return false;
+        }
+
+        // Finds the tab showing a given easel *in this window*, or any easel tab when id is
+        // null. Cross-window callers want _findEaselTabAnywhere.
+        //
+        // With no id this is "the easel tab" in the loose sense the toolbar button and the
+        // shortcut mean, and it answers with the most recently selected one rather than
+        // whichever sits leftmost. Strip order was a fair answer while one tab held every
+        // board; now that a board has a tab each it would send you to an arbitrary one,
+        // which for the general "open the easel" gesture is almost never the one you were
+        // last working on.
+        _findEaselTab(easelId = null) {
+            let best = null;
+            for (const tab of gBrowser.tabs) {
+                if (!this._matchEaselTab(tab, easelId)) continue;
+                if (easelId) return tab;
+                if (!best || (tab.lastAccessed || 0) > (best.lastAccessed || 0)) best = tab;
+            }
+            return best;
         }
 
         // Looked up fresh every time rather than cached: a cached page reference would
@@ -161,35 +263,38 @@
             }
         }
 
-        // One easel open in one tab at a time. Opening one that is already open focuses
-        // it instead of standing up a second copy that would race the first on the same
-        // file.
+        // One tab per easel. Opening a board that is already open focuses its tab; opening
+        // one that is not gets a new tab, so boards can be reordered, split against each
+        // other, and closed independently the way any other tab can.
         //
-        // The fallback is unconditional, and that is the fix for a real bug: it used to
-        // be `(easelId ? null : this._findEaselTab())`, so asking for a *specific* easel
-        // while a tab showed a *different* one found no match and opened a second easel
-        // tab. Two tabs then shared one store and raced on index.json — and worse,
-        // everything that looks an easel tab up by walking gBrowser.tabs takes the first
-        // it finds, including the live-tile host, which would then render a board's
-        // websites over the wrong tab. Reusing the tab and switching it is what the
-        // "one easel at a time" invariant was supposed to mean all along.
+        // This used to reuse *any* easel tab and switch it in place, which is what made
+        // opening a second board replace the first. That fallback existed for a reason: two
+        // easel tabs used to share one store and race on index.json, and anything that
+        // looked up "the easel tab" by walking gBrowser.tabs took the first it found — the
+        // live-tile host among them, which would then render one board's websites over
+        // another board's tab. Both are fixed. The store's write queue moved to
+        // background/store.sys.mjs, a per-process singleton that serialises every write; and
+        // the live host now looks tabs up by easel id (_easelBrowserFor) and keeps a layer
+        // per board rather than one shared one.
+        //
+        // A call with no easelId still means "open the easel" in the general sense — the
+        // toolbar button and Ctrl+Shift+E — so it focuses whichever board is already open
+        // rather than opening a redundant second copy of the last one.
         openEasel(easelId = null) {
-            // Any switch this starts is recorded rather than fired and forgotten, so a
-            // caller that is about to *do* something to the easel can wait for the right
-            // one to be open. See openWithCapture, and the note there.
-            this._switching = null;
-
-            const existing = this._findEaselTab(easelId) || this._findEaselTab();
+            const existing = this._findEaselTab(easelId);
             if (existing) {
                 gBrowser.selectedTab = existing;
-                if (easelId) {
-                    const page = this._pageFor(existing);
-                    if (page) {
-                        this._switching = page.switchTo(easelId)
-                            .catch(e => console.error("[zen-easel]", e));
-                    }
-                }
                 return existing;
+            }
+
+            // Not in this window, but possibly in another. Checked only for a *named*
+            // board, because that is the one where opening a second copy does damage — two
+            // pages on one document, each overwriting the other on save. A bare "open the
+            // easel" with no board open here should give this window its own tab rather
+            // than dragging focus to some other window.
+            if (easelId) {
+                const elsewhere = this._findEaselTabAnywhere(easelId);
+                if (elsewhere) return this._focusEaselTab(elsewhere);
             }
 
             const tab = gBrowser.addTab(easelPageUrl(easelId), {
@@ -225,16 +330,10 @@
             const { EaselStore } =
                 ChromeUtils.importESModule(BASE + "background/store.sys.mjs");
 
+            // The document exists on disk before the tab is asked for, so the tab opens
+            // straight onto it — there is no switch to start and nothing to await.
             const { entry } = await EaselStore.createDocument(title);
-            const tab = this.openEasel(entry.id);
-
-            // openEasel can only *start* the switch when a page is already up. Awaiting it
-            // means a caller that wants to act on the new board — or just wants to know the
-            // click finished — is not racing the read off disk.
-            if (this._switching) {
-                try { await this._switching; } finally { this._switching = null; }
-            }
-            return tab;
+            return this.openEasel(entry.id);
         }
 
         /* --------------------------------------------------------------- input */
@@ -288,38 +387,32 @@
         }
 
         async openWithCapture(target, capture) {
-            const tab = this.openEasel(target && target !== "new" ? target : null);
+            // "new" makes its document first and gets a tab of its own. It used to be
+            // openEasel(null) followed by page.createNew(), which focused whatever board
+            // was already open and then replaced it — so asking a capture for a *fresh*
+            // easel took away the one you were looking at.
+            const tab = target === "new"
+                ? await this.createEasel()
+                : this.openEasel(target || null);
+
             const page = await this._waitForPage(tab);
             if (!page) {
                 this.toast("The easel did not open in time to place that capture");
                 return;
             }
 
+            // No switch to wait on any more, and that removes a race rather than ignoring
+            // it. This used to await an in-place easel switch, because openEasel could only
+            // *start* one: picking a board other than the one already open dropped the
+            // capture onto the old board and then swapped the board out from under it,
+            // taking the capture along. A board now has its own tab, so the tab this
+            // resolved to is already showing the board that was asked for, and the only
+            // thing worth waiting for is its page — which _waitForPage above did.
             try {
-                if (target === "new") await page.createNew();
-
-                // Waited for, and this is the whole of "Move to easel stopped working
-                // after I deleted an easel".
-                //
-                // Switching easels is asynchronous — it reads the document off disk and
-                // hands the canvas a new one. openEasel could only start it. So picking
-                // an easel other than the one already open dropped the capture onto the
-                // *old* board and then replaced that board with the new one a moment
-                // later, taking the capture with it.
-                //
-                // It looked like a change in behaviour after a deletion because until
-                // then the open tab usually already showed the easel being picked, and
-                // switchTo returns immediately in that case — there was no window for
-                // the race to happen in. Deleting one changed which easel was open, and
-                // opened the window.
-                else if (this._switching) await this._switching;
-
                 await page.addCapture(capture);
             } catch (e) {
                 console.error("[zen-easel] could not place the capture:", e);
                 this.toast(e && e.message ? e.message : "Could not place the screenshot");
-            } finally {
-                this._switching = null;
             }
         }
 
@@ -370,9 +463,15 @@
             return this._live || null;
         }
 
-        liveMount(objectId, url, geometry, options) {
+        // Every per-tile call names its board as well as its object. The host asserts the
+        // pair before acting, which is what makes "a page showing one easel can never reach
+        // into another's tiles" structural rather than a matter of the page getting its
+        // bookkeeping right. It matters more than it looks: tiles now outlive the page.
+        liveMount(easelId, objectId, url, geometry, options) {
             const live = this.live;
-            return live ? live.mount(objectId, url, geometry, options) : Promise.resolve(false);
+            return live
+                ? live.mount(easelId, objectId, url, geometry, options)
+                : Promise.resolve(false);
         }
 
         // Answered for ZenEaselLiveParent when a tile's child actor announces itself.
@@ -380,12 +479,25 @@
         // else, so the actor needs no handle on the live host itself.
         liveConfigFor(browser) { return this.live?.configFor(browser) ?? null; }
 
-        liveLayout(entries) { this.live?.layoutAll(entries); }
-        liveUnmount(objectId) { this.live?.unmount(objectId); }
-        liveUnmountAll() { this.live?.unmountAll(); }
-        liveActivate(objectId) { this.live?.activate(objectId); }
+        // A page opening a board asks what is already running on it, and is told rather than
+        // starting again. Synchronous: the answer is needed before the first paint.
+        liveAttach(easelId, reveal) { return this.live?.attach(easelId, reveal) ?? []; }
+        liveDetach(easelId) { this.live?.detach(easelId); }
+        liveSetBoardPainting(easelId, painting) { this.live?.setBoardPainting(easelId, painting); }
+
+        liveLayout(easelId, entries) { this.live?.layoutAll(easelId, entries); }
+        liveUnmount(easelId, objectId) { this.live?.unmountFor(easelId, objectId); }
+        liveUnmountBoard(easelId) { this.live?.unmountBoard(easelId); }
+        liveActivate(easelId, objectId) { this.live?.activate(easelId, objectId); }
         liveDeactivate() { this.live?.deactivate(); }
-        liveSetTileVisible(objectId, visible) { this.live?.setTileVisible(objectId, visible); }
+        liveCount(easelId) { return this.live?.count(easelId) ?? { total: 0, board: 0 }; }
+        liveList(easelId) { return this.live?.list(easelId) ?? []; }
+        liveStopAll() { this.live?.stopAll(); }
+        // Two separate reasons a tile stops painting, kept apart across the seam because the
+        // host treats them differently — see _applyTileState.
+        liveSetTileOffscreen(easelId, objectId, off) { this.live?.setTileOffscreen(easelId, objectId, off); }
+        liveSetTileHidden(easelId, objectId, hidden) { this.live?.setTileHidden(easelId, objectId, hidden); }
+        liveSetTileMuted(easelId, objectId, muted) { this.live?.setTileMuted(easelId, objectId, muted); }
 
         // Saves an exported board. The page renders the pixels and the window writes the
         // file: a file picker is chrome UI, and keeping the one filesystem write on this
@@ -461,6 +573,12 @@
             if (this.screenshotHook) {
                 this.screenshotHook.destroy();
                 this.screenshotHook = null;
+            }
+            // Drops the splitter listener and unpins anything a drag left frozen, so a
+            // reload mid-gesture cannot strand a pane at the size it was frozen at.
+            if (this.splitResize) {
+                try { this.splitResize.destroy(); } catch (e) { }
+                this.splitResize = null;
             }
             // Tiles are elements in this window; they do not get cleaned up by the page
             // going away, so they have to be torn down with the host that owns them.

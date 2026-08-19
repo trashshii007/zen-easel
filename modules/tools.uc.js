@@ -382,10 +382,39 @@
                             })
                         });
                     }
+                    this._pushMuteItem(items, hit);
                     items.push({ label: "Open source page", action: () => this.host.capture.openWebcard(hit) });
                     items.push({
                         label: "Copy source link",
                         action: () => this._copyText(hit.webcard.url)
+                    });
+                    items.push({ separator: true });
+                }
+
+                // The same pair for a web tile. It has no screenshot to go back to, so the
+                // wording is about the site rather than the picture — and unlike a webcard
+                // this is not a convenience: a running web tile can only be stopped from
+                // here or from its badge.
+                if (hit.type === "webBrowser" && hit.webBrowser.url) {
+                    const live = this.host.live;
+                    if (live && live.isLive(hit.id)) {
+                        items.push({
+                            label: "Stop this web tile",
+                            action: () => live.makeStatic(hit)
+                        });
+                    } else if (live && live.canGoLive(hit)) {
+                        items.push({
+                            label: "Load this web tile",
+                            action: () => live.requestLive(hit).catch(e => {
+                                console.error("[zen-easel] could not load the tile:", e);
+                                this.host.toast("This web tile could not be loaded");
+                            })
+                        });
+                    }
+                    this._pushMuteItem(items, hit);
+                    items.push({
+                        label: "Copy link",
+                        action: () => this._copyText(hit.webBrowser.url)
                     });
                     items.push({ separator: true });
                 }
@@ -570,6 +599,20 @@
             if (!this._popup) {
                 this.host.shadowRoot.removeEventListener("pointerdown", this._onDocPointerDown, true);
             }
+        }
+
+        // Offered on both card types, and only where it can do anything. A tile that is
+        // running off-screen keeps its audio by default, so this is the per-card override
+        // for the one that turns out to be noisy — and the card has no tab in the tab
+        // strip, so there is nowhere else this could live.
+        _pushMuteItem(items, hit) {
+            const live = this.host.live;
+            if (!live || !live.canGoLive(hit)) return;
+            const muted = live.isMuted(hit);
+            items.push({
+                label: muted ? "Unmute this card" : "Mute this card",
+                action: () => live.setMuted(hit, !muted)
+            });
         }
 
         _copyText(text) {

@@ -7,8 +7,17 @@
 // CSS selector — geometry degrades to "the wrong part of the page" when a site is redesigned,
 // where a selector degrades to nothing at all. Arc makes the same trade for the same reason.
 //
-// This file owns the *model*: which cards are live, the cap and its LRU, which one has the
-// pointer, and where each one belongs on screen. It owns no elements at all.
+// This file is a *view*: which of the open board's cards are live, which one has the pointer,
+// and where each one belongs on screen. It owns no elements at all, and — since a tile now
+// outlives both this page and any one board being open — it is no longer the record of what
+// is running either. That is the host's, along with the cap and its LRU, because this page
+// only ever knows about the board it has open and a ceiling counted here would read three
+// while the window was running nine.
+//
+// So the traffic across the seam runs both ways now. This page reports *facts* — "offscreen",
+// "a menu is over this one", "my board is in the background" — and the host decides what they
+// mean; and on attach, the host reports back what it is already running on the board being
+// opened, which is adopted rather than started again.
 //
 // The elements live in the browser window, in modules-host/live-host.uc.js, because a
 // <browser> cannot exist inside about:easel — it is a system-principal chrome document and
@@ -29,9 +38,14 @@
     const { safeExternalUrl } =
         ChromeUtils.importESModule("chrome://sine/content/zen-easel/background/validate.sys.mjs");
 
-    // How long a tile stays alive after scrolling out of view before it is torn down and
-    // the screenshot comes back.
-    const OFFSCREEN_GRACE_MS = 5000;
+    // How long a tile stays *painting* after scrolling out of view before it stops and the
+    // screenshot comes back. It keeps running either way — this is about pixels, not life.
+    //
+    // Was five seconds, because going offscreen used to mean a teardown and a reload, and
+    // the grace existed to make a fast pan survivable. It costs a visibility flip now, so it
+    // only has to be long enough that flicking across the board does not thrash every tile
+    // it passes over.
+    const OFFSCREEN_PAINT_GRACE_MS = 750;
 
     // Height of the title strip the canvas renderer draws at the bottom of a webcard, and of
     // the URL strip it draws at the top of a web tile. Both in world units, and both owned by
@@ -44,25 +58,38 @@
             this.host = host;
             this.log = window.ZenEaselUtil.log;
 
-            // objectId -> obj. No DOM: the elements are the host's.
+            // objectId -> obj, for the attached board only. No DOM: the elements are the
+            // host's, and so — since tiles outlive both this page and any one board being
+            // open — is the record of everything running in the window. This is a view.
             this._tiles = new Map();
-            // Insertion order is the LRU: the oldest live tile is the first to go.
-            this._order = [];
+            // Which board this view is attached to. Null until the first setDocument.
+            this._easelId = null;
             this._activeId = null;
             this._suspended = false;
             this._gestureIds = [];
             this._offscreenSince = new Map();
+            // Last viewport size the offscreen test ran against; see sync().
+            this._lastWidth = 0;
+            this._lastHeight = 0;
+            // Tiles currently reported to the host as outside the viewport. Still mounted,
+            // still running — the canvas paints their screenshot again in the meantime.
+            this._offscreen = new Set();
             // Tiles hidden because something in the page needs to be seen over them.
             // Still mounted, still live — just not painting. See suppressOverlapping.
             this._suppressed = new Set();
+            // Whether the host currently has this board's layer on screen. Starts true so
+            // nothing changes until the host says otherwise; see setHostPainting.
+            this._hostPainting = true;
+            // Deferred work owned by foreground(): the delay that keeps the tiles out of the
+            // tab-switch animation, and the settle passes that follow it. Declared rather
+            // than left to appear on first use, so that every field this class has is
+            // visible in one place.
+            this._revealTimer = null;
+            this._resyncTimer = null;
         }
 
         get enabled() {
             return window.ZenEaselUtil.prefs["live.enabled"];
-        }
-
-        get maxTiles() {
-            return Math.max(1, window.ZenEaselUtil.prefs["live.max-tiles"]);
         }
 
         get bridge() {
@@ -101,11 +128,31 @@
         }
 
         // Whether a tile is actually painting right now. Distinct from isLive, and the
-        // renderer wants this one: a suppressed card is still live — still loaded, still
-        // running — but its pixels are not on screen, so the canvas has to go back to
-        // drawing the screenshot or the card would be a hole.
+        // renderer wants this one: a card that is offscreen, mid-drag or behind a menu is
+        // still live — still loaded, still running — but its pixels are not on screen, so
+        // the canvas has to go back to drawing the screenshot or the card would be a hole.
+        //
+        // Every reason the host might not be painting a tile has to be listed here, because
+        // this is the only thing standing between "not painted by the host" and "not painted
+        // by anyone". _gestureIds was missing, which is why dragging a live webcard drew a
+        // hole instead of the screenshot proxy the drag was supposed to show.
         showsTile(objectId) {
-            return this._tiles.has(objectId) && !this._suppressed.has(objectId);
+            return this._hostPainting &&
+                this._tiles.has(objectId) &&
+                !this._suppressed.has(objectId) &&
+                !this._offscreen.has(objectId) &&
+                !this._gestureIds.includes(objectId);
+        }
+
+        // The host has taken this board's whole layer down or put it back — a tab switch, a
+        // split view change, the window minimised. Whole-board rather than per-tile because
+        // that is the granularity the layer has, and it is the only one of these signals the
+        // page cannot work out for itself.
+        setHostPainting(painting) {
+            const next = !!painting;
+            if (this._hostPainting === next) return;
+            this._hostPainting = next;
+            this.host.canvas.invalidate();
         }
 
         /* ------------------------------------------------------- suppression */
@@ -136,7 +183,7 @@
                 if (!overlaps) continue;
 
                 this._suppressed.add(id);
-                this.bridge?.liveSetTileVisible(id, false);
+                this.bridge?.liveSetTileHidden(this._easelId, id, true);
                 changed = true;
             }
             // The renderer skips a live card's screenshot, so the static layer has to be
@@ -147,7 +194,7 @@
         releaseSuppressed() {
             if (!this._suppressed.size) return;
             for (const id of this._suppressed) {
-                if (this._tiles.has(id)) this.bridge?.liveSetTileVisible(id, true);
+                if (this._tiles.has(id)) this.bridge?.liveSetTileHidden(this._easelId, id, false);
             }
             this._suppressed.clear();
             this.host.canvas.invalidate();
@@ -177,6 +224,14 @@
                 ) === 0;
 
                 this.host.viewport.focus({ preventScroll: true });
+                // confirmEx is modal, and putting it up takes a visibilitychange with it —
+                // so background() has already run and told the host to stop painting this
+                // board. Nothing will undo that on its own: the page is visible again, so
+                // no second visibilitychange is coming. Re-asserted here, or the tile this
+                // prompt just authorised mounts straight into a hidden layer.
+                if (!document.hidden && this._easelId) {
+                    this.bridge?.liveSetBoardPainting(this._easelId, true);
+                }
                 if (!accepted) return false;
                 Services.prefs.setBoolPref("zen.easel.live.explained", true);
             }
@@ -186,6 +241,30 @@
                 this.host.store.markDirty();
             }
             return this._mount(obj);
+        }
+
+        /* -------------------------------------------------------------- audio */
+
+        // Where the card's own mute setting lives. Kept on the object rather than the tile
+        // so it survives the tile being stopped and started again, the way useLiveWebCard
+        // does — the difference being that this one *is* honoured on load, because it only
+        // ever makes the board quieter.
+        _audioSource(obj) {
+            return obj.type === "webBrowser" ? obj.webBrowser : obj.webcard;
+        }
+
+        isMuted(obj) {
+            const source = obj && this._audioSource(obj);
+            return !!(source && source.muted);
+        }
+
+        setMuted(obj, muted) {
+            const source = obj && this._audioSource(obj);
+            if (!source) return;
+            source.muted = !!muted;
+            this.host.store.markDirty();
+            this.bridge?.liveSetTileMuted(this._easelId, obj.id, !!muted);
+            this.host.canvas.invalidate();
         }
 
         makeStatic(obj) {
@@ -203,29 +282,28 @@
 
             const url = this._urlFor(obj);
             const bridge = this.bridge;
-            if (!url || !bridge) return false;
+            const easelId = this._easelId;
+            if (!url || !bridge || !easelId) return false;
 
-            // Evict before creating, so the cap is a real ceiling rather than a target.
-            while (this._order.length >= this.maxTiles) {
-                const oldest = this._order.find(id => id !== this._activeId) || this._order[0];
-                this._unmount(oldest);
-            }
+            // The cap is the host's now. It has to be: this map only ever holds the board
+            // that is open, and tiles outlive board switches, so a ceiling counted here
+            // would read three while the window was running nine.
 
             // Registered before the await: sync() runs on every frame and must already know
             // this tile exists, or the first layout would arrive before the geometry does.
             this._tiles.set(obj.id, obj);
-            this._order.push(obj.id);
 
             const capture = obj.type === "webBrowser" ? null : obj.webcard.capture;
             let ok = false;
             try {
-                ok = await bridge.liveMount(obj.id, url, this._geometryFor(obj), {
+                ok = await bridge.liveMount(easelId, obj.id, url, this._geometryFor(obj), {
                     userContextId: this._userContextId(),
                     private: !!window.ZenEaselUtil.prefs["live.private"],
                     // The locks exist to protect a crop, so a tile with no crop declines
                     // them: a web tile is a window onto a site, not a pinned view of one.
                     pinned: !!capture,
-                    scrollOffset: capture ? capture.webContentOffset : null
+                    scrollOffset: capture ? capture.webContentOffset : null,
+                    muted: this.isMuted(obj)
                 });
             } catch (e) {
                 console.error("[zen-easel] a live card failed to mount:", e);
@@ -233,7 +311,6 @@
 
             if (!ok) {
                 this._tiles.delete(obj.id);
-                this._order = this._order.filter(id => id !== obj.id);
                 this.host.toast("That card could not be opened");
                 return false;
             }
@@ -247,12 +324,12 @@
         _unmount(objectId) {
             if (!this._tiles.has(objectId)) return;
             this._offscreenSince.delete(objectId);
+            this._offscreen.delete(objectId);
             this._suppressed.delete(objectId);
             this._tiles.delete(objectId);
-            this._order = this._order.filter(id => id !== objectId);
             if (this._activeId === objectId) this._activeId = null;
 
-            this.bridge?.liveUnmount(objectId);
+            this.bridge?.liveUnmount(this._easelId, objectId);
             this.host.canvas.invalidate();
         }
 
@@ -273,9 +350,9 @@
         forget(objectId) {
             if (!this._tiles.has(objectId)) return;
             this._offscreenSince.delete(objectId);
+            this._offscreen.delete(objectId);
             this._suppressed.delete(objectId);
             this._tiles.delete(objectId);
-            this._order = this._order.filter(id => id !== objectId);
             if (this._activeId === objectId) this._activeId = null;
             this.host.canvas.invalidate();
         }
@@ -290,7 +367,7 @@
         // Called from the canvas's paint, on the same frame as everything else, so tiles
         // never lag the board they are sitting on.
         sync() {
-            if (!this._tiles.size) return;
+            if (!this._tiles.size || !this._easelId) return;
 
             // A tile whose object is gone has to go with it. Done here rather than in
             // removeObjects because deletion is not the only way an object stops existing:
@@ -301,24 +378,52 @@
             if (!this._tiles.size) return;
 
             const origin = this._viewportOrigin();
+            const width = this.host.canvas.renderer.width;
+            const height = this.host.canvas.renderer.height;
+            const now = Date.now();
             const entries = [];
-            for (const [id, obj] of this._tiles) {
-                if (this._gestureIds.includes(id)) continue;
-                entries.push({ id, geometry: this._geometryFor(obj, origin) });
-            }
-            if (entries.length) this.bridge?.liveLayout(entries);
 
-            this._sweepOffscreen(origin);
+            // A viewport that is still changing size cannot be asked whether a card is
+            // outside it. Every frame of a resize gives a different answer, and the board's
+            // own zoom is being re-clamped to the new width underneath, so a card can read
+            // as offscreen for a few frames purely because the two have not agreed yet.
+            //
+            // The countdown is therefore restarted whenever the viewport changes size, so it
+            // only ever runs while the answer is stable. Without this a split-view drag long
+            // enough to outlast the grace hides cards that never actually left the board —
+            // which the five-second grace this replaced was accidentally immune to, being far
+            // longer than anyone drags for.
+            if (width !== this._lastWidth || height !== this._lastHeight) {
+                this._lastWidth = width;
+                this._lastHeight = height;
+                this._offscreenSince.clear();
+            }
+
+            for (const [id, obj] of this._tiles) {
+                // Built once. The host wants tab space and the offscreen test wants viewport
+                // space, and the two differ by a constant translation — so this used to be
+                // two _geometryFor calls per tile per painted frame, which is the single
+                // most-executed thing in the paint path once the cap is raised.
+                const geometry = this._geometryFor(obj, origin);
+
+                // Only the *layout* is skipped mid-gesture: a remote frame is not relaid out
+                // at 120Hz. The visibility test still has to run, or a card dragged off the
+                // edge of the board would never be noticed as offscreen.
+                if (!this._gestureIds.includes(id)) entries.push({ id, geometry });
+
+                if (width && height) this._noteVisibility(id, geometry.rect, origin, width, height, now);
+            }
+            if (entries.length) this.bridge?.liveLayout(this._easelId, entries);
         }
 
-        // The id set is built once rather than scanning the object list per tile: this
-        // runs on every painted frame, and the nested version was O(tiles × objects) in
-        // the paint path on a board that could hold hundreds of objects.
+        // Asked of the canvas's own index rather than answered here. The nested version was
+        // O(tiles × objects); replacing it with a locally-built Set fixed that but still
+        // allocated one entry per object on the board on every painted frame, to answer a
+        // question about at most a handful of tiles. canvas.hasObject is the same amortised
+        // map the canvas already maintains for its own hot paths.
         _sweepOrphans() {
-            const alive = new Set();
-            for (const obj of this.host.canvas.objects) alive.add(obj.id);
             for (const id of [...this._tiles.keys()]) {
-                if (!alive.has(id)) this._unmount(id);
+                if (!this.host.canvas.hasObject(id)) this._unmount(id);
             }
         }
 
@@ -409,29 +514,40 @@
 
         // Replaces the IntersectionObserver the DOM version used: with no elements on this
         // side there is nothing to observe, and the geometry is already computed each frame.
-        _sweepOffscreen(origin = this._viewportOrigin()) {
-            const width = this.host.canvas.renderer.width;
-            const height = this.host.canvas.renderer.height;
-            if (!width || !height) return;
+        //
+        // Called from sync() with a rect the caller already built, in *tab* space — the
+        // origin is subtracted here rather than the whole geometry being rebuilt against a
+        // zero origin, which is what the second _geometryFor call per tile used to be for.
+        _noteVisibility(id, tabRect, origin, width, height, now) {
+            if (id === this._activeId) { this._offscreenSince.delete(id); return; }
 
-            const now = Date.now();
-            for (const [id, obj] of this._tiles) {
-                if (id === this._activeId) { this._offscreenSince.delete(id); continue; }
+            const x = tabRect.x - origin.x;
+            const y = tabRect.y - origin.y;
+            const visible = x + tabRect.w > 0 && x < width &&
+                y + tabRect.h > 0 && y < height;
 
-                // Tested against the viewport, so the rect is put back into viewport space
-                // rather than the tab space the host wants.
-                const { rect } = this._geometryFor(obj, { x: 0, y: 0 });
-                const visible = rect.x + rect.w > 0 && rect.x < width &&
-                    rect.y + rect.h > 0 && rect.y < height;
-
-                if (visible) {
-                    this._offscreenSince.delete(id);
-                } else {
-                    const since = this._offscreenSince.get(id);
-                    if (!since) this._offscreenSince.set(id, now);
-                    else if (now - since > OFFSCREEN_GRACE_MS) this._unmount(id);
-                }
+            // Asymmetric on purpose: leaving is deferred by the grace, returning is not.
+            // A card scrolled back into view should be showing the site by the time the pan
+            // settles, not three quarters of a second later.
+            if (visible) {
+                this._offscreenSince.delete(id);
+                this._setOffscreen(id, false);
+                return;
             }
+
+            const since = this._offscreenSince.get(id);
+            if (!since) this._offscreenSince.set(id, now);
+            else if (now - since > OFFSCREEN_PAINT_GRACE_MS) this._setOffscreen(id, true);
+        }
+
+        // Stops the tile painting; does not stop it running. The canvas has to be told as
+        // well, because it is what paints the screenshot back in underneath.
+        _setOffscreen(id, offscreen) {
+            if (offscreen === this._offscreen.has(id)) return;
+            if (offscreen) this._offscreen.add(id);
+            else this._offscreen.delete(id);
+            this.bridge?.liveSetTileOffscreen(this._easelId, id, offscreen);
+            this.host.canvas.invalidate();
         }
 
         /* -------------------------------------------------------- activation */
@@ -445,11 +561,9 @@
             if (!this._tiles.has(objectId)) return;
 
             this._activeId = objectId;
-            this.bridge?.liveActivate(objectId);
-
-            // Refresh the LRU: the card being used should be the last one evicted.
-            this._order = this._order.filter(id => id !== objectId);
-            this._order.push(objectId);
+            // Also refreshes the LRU: the card being used should be the last one evicted.
+            // The order itself is the host's, because the cap is.
+            this.bridge?.liveActivate(this._easelId, objectId);
         }
 
         deactivate() {
@@ -470,7 +584,7 @@
             for (const id of objectIds) {
                 if (!this._tiles.has(id)) continue;
                 this._gestureIds.push(id);
-                this.bridge?.liveSetTileVisible(id, false);
+                this.bridge?.liveSetTileHidden(this._easelId, id, true);
             }
         }
 
@@ -481,33 +595,170 @@
             for (const id of ids) {
                 const obj = this._tiles.get(id);
                 if (!obj) continue;
-                this.bridge?.liveLayout([{ id, geometry: this._geometryFor(obj) }]);
+                this.bridge?.liveLayout(this._easelId, [{ id, geometry: this._geometryFor(obj) }]);
                 // Not unconditionally: a tile hidden because a menu is over it
                 // must stay hidden when the drag that also hid it finishes.
-                if (!this._suppressed.has(id)) this.bridge?.liveSetTileVisible(id, true);
+                if (!this._suppressed.has(id)) this.bridge?.liveSetTileHidden(this._easelId, id, false);
             }
         }
 
-        /* -------------------------------------------------------- suspension */
+        /* -------------------------------------------------------- attachment */
 
-        // A backgrounded easel tab has no business keeping content processes alive, and a
-        // page being torn down must not leave elements behind in a window that outlives it.
-        suspendAll() {
-            this._suspended = true;
-            this._tiles.clear();
-            this._order = [];
-            this._offscreenSince.clear();
-            this._suppressed.clear();
-            this._activeId = null;
-            this.bridge?.liveUnmountAll();
+        // This view moves to a board. The tiles already running on it are *adopted*, not
+        // remounted — the host has been running them all along, and asking it to mount what
+        // it already has would tear down a working site and load it again. That is exactly
+        // what switching boards and back used to do, via the orphan sweep, and what
+        // reloading the tab used to do via suspendAll.
+        //
+        // Synchronous, and called before the first paint of the new board: a tile this has
+        // not adopted by then is one the orphan sweep would treat as stray.
+        attach(easelId, reveal = true) {
+            this._forgetAll();
+            this._easelId = easelId || null;
+            this._suspended = false;
+            if (!this._easelId || !this.bridge) return;
+
+            for (const { objectId, url } of this.bridge.liveAttach(this._easelId, reveal) || []) {
+                const obj = this.host.canvas._byId(objectId);
+                // The card was deleted, or had its URL changed, while this board was closed.
+                // The tile is genuinely stray now, so it is stopped rather than adopted.
+                if (!obj || this._urlFor(obj) !== url) {
+                    this.bridge.liveUnmount(this._easelId, objectId);
+                    continue;
+                }
+                this._tiles.set(objectId, obj);
+            }
+            this.host.canvas.invalidate();
         }
 
-        resume() {
-            this._suspended = false;
+        // The page is going away for good — unloaded, reloaded, navigated off — and its
+        // board's tiles go with it. Distinct from background(), which is you looking at
+        // another tab for a moment and stops the pixels only.
+        //
+        // Reload is the case worth being explicit about: Ctrl+R starts the board over,
+        // websites included. A refresh that readopted the processes it had a moment ago
+        // would be the one reload in the browser that refreshes nothing.
+        detach() {
+            this._forgetAll();
+            const easelId = this._easelId;
+            this._easelId = null;
+            this._suspended = true;
+            if (easelId) this.bridge?.liveDetach(easelId);
+        }
+
+        _forgetAll() {
+            if (this._resyncTimer) {
+                window.clearTimeout(this._resyncTimer);
+                this._resyncTimer = null;
+            }
+            this._cancelReveal();
+            this._tiles.clear();
+            this._offscreenSince.clear();
+            this._offscreen.clear();
+            this._suppressed.clear();
+            this._gestureIds = [];
+            this._activeId = null;
+        }
+
+        // The tab was backgrounded or the window minimised. Painting stops; nothing else
+        // does. A dashboard left open on a board is still refreshing when you come back,
+        // which is the whole of what this change is for.
+        background() {
+            // Cancelled first. Switching away inside the reveal delay is the common case
+            // when flicking between tabs, and a reveal that fired after this would put the
+            // layer back up for a board nobody is looking at.
+            this._cancelReveal();
+            if (this._easelId) this.bridge?.liveSetBoardPainting(this._easelId, false);
+        }
+
+        _cancelReveal() {
+            if (!this._revealTimer) return;
+            window.clearTimeout(this._revealTimer);
+            this._revealTimer = null;
+        }
+
+        // Coming back. The order is load-bearing, and it is the reason this is not just
+        // "clear a flag" the way resume() was:
+        //
+        //   attach   re-establishes which board the host should be painting, and re-adopts
+        //            whatever is still running on it. Needed because a tab switch does not
+        //            run setDocument, so nothing else would ever re-attach.
+        //   sync     puts the geometry right *before* anything is unhidden. The board did
+        //            not move while hidden, but the layer may have — a window resize or a
+        //            sidebar collapse repositions it without this page painting at all.
+        //   paint    only now.
+        //
+        // Unhiding first would show every tile for one frame at the offset it had when the
+        // tab was backgrounded.
+        foreground() {
+            const doc = this.host.canvas.doc;
+            if (!doc) return;
+            // Attached without revealing: the tiles are still where they were when this
+            // tab was left, so the layer must stay down until sync() has moved them.
+            this.attach(doc.id, false);
+            this.sync();
+            this.host.canvas.invalidate();
+            this._revealSoon();
+            this._resyncSoon();
+        }
+
+        // Puts the tiles back a moment after the tab does, rather than on the same turn.
+        //
+        // A live tile is a <browser> in the chrome window, so it is not part of whatever
+        // transition Zen runs when a tab comes forward — it just appears, at full opacity,
+        // wherever the layer currently is. Revealing it while that animation is still
+        // playing is the jarring part: the board slides or fades in and the websites do not
+        // travel with it. Waiting until the animation is over means the tiles arrive onto a
+        // board that has already settled, which reads as the card simply coming to life.
+        //
+        // The screenshots are on screen throughout, so nothing is missing during the wait —
+        // this trades a few frames of static card for not seeing the tiles fly.
+        _revealSoon() {
+            if (this._revealTimer) window.clearTimeout(this._revealTimer);
+
+            const reveal = () => {
+                this._revealTimer = null;
+                // Switched away again while waiting. The host would refuse anyway — it
+                // re-checks which tab is showing — but not asking is clearer than relying
+                // on being told no.
+                if (this._suspended || !this._easelId || document.hidden) return;
+                // Geometry immediately before the reveal rather than only at the start of
+                // the wait: the animation that made the wait necessary is also the thing
+                // most likely to have moved the layer during it.
+                this.sync();
+                this.bridge?.liveSetBoardPainting(this._easelId, true);
+                this.host.canvas.invalidate();
+            };
+
+            const delay = window.ZenEaselUtil.prefs["live.reveal-delay-ms"];
+            if (!Number.isInteger(delay) || delay <= 0) { reveal(); return; }
+            this._revealTimer = window.setTimeout(reveal, delay);
+        }
+
+        // Sync again over the next couple of frames.
+        //
+        // The geometry a tile is placed at is built from this page's own layout — see
+        // _viewportOrigin — and at the moment a tab becomes visible again that layout is
+        // still settling. One pass reads it mid-transition and places every tile at an
+        // offset that is about to be wrong, and because the paint loop is dirty-driven
+        // rather than continuous, on an idle board there is no second pass to correct it.
+        //
+        // Bounded, and it invalidates rather than syncing directly so the work rides the
+        // normal paint rather than fighting it.
+        _resyncSoon() {
+            if (this._resyncTimer) return;
+            let left = 3;
+            const again = () => {
+                this._resyncTimer = null;
+                if (this._suspended || !this._easelId) return;
+                this.host.canvas.invalidate();
+                if (--left > 0) this._resyncTimer = window.setTimeout(again, 120);
+            };
+            this._resyncTimer = window.setTimeout(again, 60);
         }
 
         destroy() {
-            this.suspendAll();
+            this.detach();
         }
     }
 

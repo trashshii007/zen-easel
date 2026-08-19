@@ -59,6 +59,19 @@
         ["Zen Easel Space Mono", "SpaceMono-Italic.ttf", { style: "italic" }]
     ];
 
+    // Backing stores are allocated in steps of this many layout pixels, and only ever
+    // grow while the viewport is moving. See resize().
+    const BUFFER_STEP = 128;
+
+    // How much bigger than the viewport a *growing* backing store is made. The point is
+    // not the memory, it is that a drag of a split divider stays inside one allocation:
+    // this much expansion is already drawn and costs nothing to reveal. Given back by the
+    // trim once the size holds still.
+    const BUFFER_GROWTH_SLACK = 512;
+
+    // How long the size has to hold still before the slack is given back.
+    const BUFFER_TRIM_MS = 250;
+
     let fontsPromise = null;
 
     // Resolves once every face is usable. Callers repaint on resolution so the first
@@ -98,8 +111,15 @@
             this.overlayCtx = this.overlayCanvas.getContext("2d");
 
             this.dpr = 1;
+            // The viewport, in layout pixels: what the board is laid out and clamped
+            // against, and what decides which objects are on screen.
             this.width = 0;
             this.height = 0;
+            // The canvases, which are the same size or larger. See resize().
+            this.bufferWidth = 0;
+            this.bufferHeight = 0;
+            this.bufferDpr = 1;
+            this._trimTimer = null;
 
             // asset name -> HTMLImageElement. Decoding is async; a miss paints a
             // placeholder and repaints when the bitmap lands.
@@ -121,25 +141,112 @@
 
         // Canvases carry a backing store at device resolution and a CSS size in
         // layout pixels. Skipping this is what makes canvas text look soft on HiDPI.
+        //
+        // Returns null when nothing moved, and otherwise whether the backing stores were
+        // replaced — which is the only outcome here that empties them, and so the only one
+        // that obliges the caller to repaint. A viewport that merely moved inside the
+        // buffer it already has is still looking at a correct picture. See the resize
+        // observer in canvas.uc.js.
         resize() {
             const rect = this.staticCanvas.parentNode.getBoundingClientRect();
             const dpr = window.devicePixelRatio || 1;
-            if (!rect.width || !rect.height) return false;
+            if (!rect.width || !rect.height) return null;
             if (rect.width === this.width && rect.height === this.height && dpr === this.dpr) {
-                return false;
+                return null;
             }
 
             this.width = rect.width;
             this.height = rect.height;
             this.dpr = dpr;
 
-            for (const canvas of [this.staticCanvas, this.activeCanvas, this.overlayCanvas]) {
-                canvas.width = Math.max(1, Math.round(rect.width * dpr));
-                canvas.height = Math.max(1, Math.round(rect.height * dpr));
-                canvas.style.width = `${rect.width}px`;
-                canvas.style.height = `${rect.height}px`;
+            // The canvases are allowed to be bigger than the viewport, and while it is
+            // moving they only ever grow.
+            //
+            // Assigning canvas.width reallocates the backing store — three of them, at
+            // device resolution, so on a HiDPI board that is tens of megabytes allocated,
+            // zeroed and handed to the compositor as new textures. Sized to the rect
+            // exactly, that happened on every frame of a drag: the most expensive thing in
+            // the resize path by a wide margin, and the only thing in it that throws the
+            // pixels already drawn away.
+            //
+            // Overdrawing instead costs nothing to look at. .easel-viewport is
+            // overflow:hidden and the canvases are absolutely positioned at its origin, so
+            // the excess is clipped; the board is drawn from that same origin, so the
+            // visible pixels are identical either way. Growing in steps means an expanding
+            // drag reallocates once every BUFFER_STEP pixels rather than once a frame, and
+            // a shrinking one never reallocates at all.
+            //
+            // Growing takes a wide margin rather than the next step, because the frame that
+            // reallocates is the frame that has to repaint, and a repaint during a resize is
+            // the one thing that has been observed to flicker. One of them per gesture is a
+            // fault you have to be looking for; one per frame is the board strobing. The
+            // margin is only paid while the board is being resized — the trim takes it back.
+            //
+            // Not on the first allocation, where there is no gesture and no previous size to
+            // grow from: a board that opens and is never resized holds exactly what it needs.
+            //
+            // The slack is given back once the size holds still; see _scheduleTrim.
+            const slack = this.bufferWidth ? BUFFER_GROWTH_SLACK : 0;
+            const width = Math.max(this.bufferWidth, Math.ceil((rect.width + slack) / BUFFER_STEP) * BUFFER_STEP);
+            const height = Math.max(this.bufferHeight, Math.ceil((rect.height + slack) / BUFFER_STEP) * BUFFER_STEP);
+            let reallocated = false;
+            if (width !== this.bufferWidth || height !== this.bufferHeight || dpr !== this.bufferDpr) {
+                this._allocate(width, height, dpr);
+                reallocated = true;
             }
-            return true;
+            this._scheduleTrim();
+            return { reallocated };
+        }
+
+        // The only place a backing store is assigned, because it is the only operation in
+        // the file that destroys what is already drawn: every caller has to be one that
+        // repaints immediately afterwards.
+        _allocate(width, height, dpr) {
+            this.bufferWidth = width;
+            this.bufferHeight = height;
+            this.bufferDpr = dpr;
+
+            for (const canvas of [this.staticCanvas, this.activeCanvas, this.overlayCanvas]) {
+                canvas.width = Math.max(1, Math.round(width * dpr));
+                canvas.height = Math.max(1, Math.round(height * dpr));
+                canvas.style.width = `${width}px`;
+                canvas.style.height = `${height}px`;
+            }
+        }
+
+        // A board dragged down to a third of the window would otherwise hold the buffers its
+        // full width bought for the life of the tab. Debounced rather than run from resize()
+        // so that a drag — where every frame is a new size — never trims, which is the whole
+        // point of the buffers only growing.
+        _scheduleTrim() {
+            if (this._trimTimer) window.clearTimeout(this._trimTimer);
+            this._trimTimer = window.setTimeout(() => {
+                this._trimTimer = null;
+                this._trim();
+            }, BUFFER_TRIM_MS);
+        }
+
+        _trim() {
+            // A snapshot has the buffer fields pointed at its own offscreen bitmap, so
+            // reallocating from them would size the canvases to whatever was being exported.
+            // Deferred rather than dropped: this is the only thing that ever gives the slack
+            // back, and abandoning the one attempt would leave a board that happened to be
+            // exporting when the timer fired holding its widest buffers until the next
+            // resize — which on a board nobody resizes again is the life of the tab.
+            if (this._snapshotting) { this._scheduleTrim(); return; }
+            if (!this.width || !this.height) return;
+            if (!this.staticCanvas.isConnected) return;
+
+            const width = Math.ceil(this.width / BUFFER_STEP) * BUFFER_STEP;
+            const height = Math.ceil(this.height / BUFFER_STEP) * BUFFER_STEP;
+            if (width === this.bufferWidth && height === this.bufferHeight) return;
+
+            this._allocate(width, height, this.dpr);
+            // Reallocating just emptied all three. Nothing else is going to paint them —
+            // this runs from a timer, a quarter of a second after anything last moved — and
+            // scheduling the repaint would leave the board blank until the next frame, which
+            // is the same one-frame hole the resize observer exists to avoid.
+            if (this.host.canvas) this.host.canvas.repaintNow();
         }
 
         /* -------------------------------------------------------------- snapshot */
@@ -175,10 +282,18 @@
                 panY: (-box.y + padding) * scale
             };
 
-            const saved = { width: this.width, height: this.height, dpr: this.dpr };
+            const saved = {
+                width: this.width, height: this.height, dpr: this.dpr,
+                bufferWidth: this.bufferWidth, bufferHeight: this.bufferHeight
+            };
             this.width = width;
             this.height = height;
             this.dpr = 1;
+            // The offscreen bitmap is exactly the size asked for, so for the duration of the
+            // snapshot the buffer and the viewport are the same thing — _begin clears
+            // against the buffer, and it must not clear beyond the bitmap it was given.
+            this.bufferWidth = width;
+            this.bufferHeight = height;
             this._snapshotting = true;
             try {
                 this._begin(ctx, view);
@@ -194,6 +309,8 @@
                 this.width = saved.width;
                 this.height = saved.height;
                 this.dpr = saved.dpr;
+                this.bufferWidth = saved.bufferWidth;
+                this.bufferHeight = saved.bufferHeight;
                 this._snapshotting = false;
             }
 
@@ -203,7 +320,11 @@
 
         _begin(ctx, view) {
             ctx.setTransform(1, 0, 0, 1, 0, 0);
-            ctx.clearRect(0, 0, this.width * this.dpr, this.height * this.dpr);
+            // The whole backing store, not the viewport: a buffer can be larger than the
+            // board is showing and the excess is only clipped, so clearing to the viewport
+            // would leave the previous frame's pixels sitting in it — to be revealed by the
+            // next expansion, in the moment before the repaint it schedules has drawn.
+            ctx.clearRect(0, 0, this.bufferWidth * this.dpr, this.bufferHeight * this.dpr);
             if (view) {
                 const s = view.zoom * this.dpr;
                 ctx.setTransform(s, 0, 0, s, view.panX * this.dpr, view.panY * this.dpr);
@@ -218,13 +339,25 @@
 
         // World-space rectangle currently on screen, padded so an object whose stroke
         // or shadow overhangs its bounds does not pop in at the edge.
+        // The bounds objects are culled against — the *buffer*, not the viewport.
+        //
+        // The difference is the slack, and drawing into it is the whole reason it exists.
+        // A board is drawn from the viewport's origin at a scale a resize does not change,
+        // so a canvas drawn out to the buffer's edge stays correct while the viewport moves
+        // anywhere inside it: shrinking shows less of it, growing shows more of what is
+        // already there. Culled to the viewport instead, the slack would be empty, and every
+        // frame of an expanding drag would have to repaint to fill the strip it just
+        // revealed — which is the flicker this is here to avoid.
+        //
+        // The cost is drawing objects that are off screen by up to the slack. On a board
+        // where that matters, it is a repaint that already had to walk the object list.
         _viewportBounds(view) {
             const pad = 64 / view.zoom;
             return {
                 x: -view.panX / view.zoom - pad,
                 y: -view.panY / view.zoom - pad,
-                w: this.width / view.zoom + pad * 2,
-                h: this.height / view.zoom + pad * 2
+                w: this.bufferWidth / view.zoom + pad * 2,
+                h: this.bufferHeight / view.zoom + pad * 2
             };
         }
 
@@ -338,7 +471,7 @@
         clearActive() {
             const ctx = this.activeCtx;
             ctx.setTransform(1, 0, 0, 1, 0, 0);
-            ctx.clearRect(0, 0, this.width * this.dpr, this.height * this.dpr);
+            ctx.clearRect(0, 0, this.bufferWidth * this.dpr, this.bufferHeight * this.dpr);
         }
 
         /* ---------------------------------------------------------- object draw */
@@ -571,11 +704,19 @@
             // Snapshots are a different question: there is no <browser> over an offscreen
             // bitmap, so a live card has to be painted as the screenshot it was captured
             // from or it comes out as an empty panel.
-            // showsTile, not isLive: a card whose tile is temporarily hidden — a
-            // context menu is open over it — is still live, but its pixels are not
-            // there, so the screenshot has to be painted or the card is a hole.
-            const isLive = !this._snapshotting && this.host.live
+            // Two questions, and they used to share one answer.
+            //
+            //   showsTile  are this card's pixels coming from a <browser> right now. Decides
+            //              whether to paint the screenshot — a card whose tile is hidden for
+            //              any reason (menu over it, mid-drag, scrolled off) needs it back,
+            //              or it is a hole.
+            //   isLive     is the site loaded and running. Decides the badge glyph only. A
+            //              card scrolled off the board is still live, and drawing ▶ for it
+            //              would invite a second mount of something already mounted.
+            const showsTile = !this._snapshotting && this.host.live
                 ? this.host.live.showsTile(obj.id) : false;
+            const isLive = !this._snapshotting && this.host.live
+                ? this.host.live.isLive(obj.id) : false;
 
             ctx.save();
             ctx.beginPath();
@@ -591,7 +732,7 @@
             // Only the screenshot is skipped. The footer strip below stays canvas-drawn,
             // and the live tile is deliberately sized to the image area alone so it does
             // not cover it — a live card keeps the same title bar as a static one.
-            if (obj.webcard.asset && !isLive) {
+            if (obj.webcard.asset && !showsTile) {
                 const image = this._image(obj.webcard.asset);
                 if (image) {
                     // Cover, not stretch: captures keep their aspect ratio the way the
@@ -609,10 +750,12 @@
             }
 
             // The play/pause control, drawn before the label so the label knows to make room.
-            const badge = this.webcardBadgeRect(obj);
+            const badge = this.liveBadgeRect(obj);
             const showBadge = badge && !this._snapshotting &&
                 (isLive || (this.host.live && this.host.live.canGoLive(obj)));
+            const showMuted = showBadge && this.host.live && this.host.live.isMuted(obj);
             if (showBadge) this._drawLiveBadge(ctx, badge, isLive);
+            if (showMuted) this._drawMutedGlyph(ctx, badge);
 
             const label = obj.webcard.title || obj.webcard.url || "";
             if (label) {
@@ -622,7 +765,8 @@
                 ctx.textBaseline = "middle";
                 ctx.textAlign = "left";
                 const textY = obj.webcard.asset ? obj.y + imageHeight + footerHeight / 2 : obj.y + obj.h / 2;
-                const room = obj.w - 18 - (showBadge ? badge.w + 8 : 0);
+                const room = obj.w - 18 - (showBadge ? badge.w + 8 : 0)
+                    - (showMuted ? badge.h * 0.62 + 6 : 0);
                 ctx.fillText(this._ellipsize(ctx, label, room), obj.x + 9, textY);
             }
             ctx.restore();
@@ -635,9 +779,32 @@
         // website the moment it was needed to turn it off. The footer is canvas-drawn in
         // both states, so one control works for both.
         //
-        // Returns world coordinates, or null for a card with no footer to put it in.
-        webcardBadgeRect(obj) {
-            if (!obj || obj.type !== "webcard" || !obj.webcard.asset) return null;
+        // Returns world coordinates, or null for a card with no strip to put it in.
+        //
+        // Both object types get one, and for the same reason. A web tile used to have no
+        // pause control at all — it was mounted by a plain click and only ever stopped by
+        // the offscreen sweep or the tab being backgrounded. Now that neither of those
+        // happens, the badge is the only thing standing between a running web tile and one
+        // that cannot be stopped short of deleting the card.
+        //
+        // A web tile's strip is at the top rather than the bottom, because that is where its
+        // URL bar is and the tile is inset below it.
+        liveBadgeRect(obj) {
+            if (!obj) return null;
+
+            if (obj.type === "webBrowser") {
+                const strip = Math.min(WEB_BROWSER_BAR, obj.h);
+                const size = Math.min(WEBCARD_BADGE, strip - 8);
+                if (size <= 0 || obj.w < size * 3) return null;
+                return {
+                    x: obj.x + obj.w - size - 8,
+                    y: obj.y + (strip - size) / 2,
+                    w: size,
+                    h: size
+                };
+            }
+
+            if (obj.type !== "webcard" || !obj.webcard.asset) return null;
             const size = Math.min(WEBCARD_BADGE, WEBCARD_FOOTER - 8);
             if (size <= 0 || obj.w < size * 3) return null;
             return {
@@ -646,6 +813,42 @@
                 w: size,
                 h: size
             };
+        }
+
+        // A crossed-out speaker, drawn to the left of the play/pause badge and only for a
+        // card that is actually muted. Only when muted, so a board where nobody has touched
+        // the setting looks exactly as it did — the glyph is a state worth noticing, not a
+        // control worth advertising.
+        _drawMutedGlyph(ctx, badge) {
+            const size = badge.h * 0.62;
+            const cx = badge.x - 6 - size / 2;
+            const cy = badge.y + badge.h / 2;
+            const w = size / 2;
+
+            ctx.save();
+            ctx.strokeStyle = this._mutedColor();
+            ctx.fillStyle = this._mutedColor();
+            ctx.lineWidth = Math.max(1, size * 0.12);
+            ctx.lineCap = "round";
+
+            // The cone, as a solid wedge — at this size anything more detailed is mush.
+            ctx.beginPath();
+            ctx.moveTo(cx - w, cy - w * 0.35);
+            ctx.lineTo(cx - w * 0.25, cy - w * 0.35);
+            ctx.lineTo(cx + w * 0.35, cy - w);
+            ctx.lineTo(cx + w * 0.35, cy + w);
+            ctx.lineTo(cx - w * 0.25, cy + w * 0.35);
+            ctx.lineTo(cx - w, cy + w * 0.35);
+            ctx.closePath();
+            ctx.fill();
+
+            ctx.beginPath();
+            ctx.moveTo(cx + w * 0.6, cy - w * 0.5);
+            ctx.lineTo(cx + w * 1.2, cy + w * 0.5);
+            ctx.moveTo(cx + w * 1.2, cy - w * 0.5);
+            ctx.lineTo(cx + w * 0.6, cy + w * 0.5);
+            ctx.stroke();
+            ctx.restore();
         }
 
         _drawLiveBadge(ctx, rect, isLive) {
@@ -699,23 +902,49 @@
             ctx.fillStyle = this._withAlpha(this._mutedColor(), 0.08);
             ctx.fillRect(obj.x, obj.y, obj.w, barHeight);
 
+            // Three questions, and they are not the same question.
+            //
+            //   isLive     is the site loaded and running. Drives the badge glyph, and
+            //              distinguishes "loaded but not on screen" from "not loaded" for
+            //              the placeholder below.
+            //   showsTile  are the tile's pixels on screen right now.
+            //
+            // Keying the placeholder off showsTile alone told you to load a page that was
+            // already loaded and running, every time it scrolled off the board.
+            const live = this.host.live;
+            const isLive = !this._snapshotting && live ? live.isLive(obj.id) : false;
+            const showsTile = !this._snapshotting && live ? live.showsTile(obj.id) : false;
+
+            // Drawn before the label so the label knows to make room, the same way the
+            // webcard's footer does it.
+            const badge = this.liveBadgeRect(obj);
+            const showBadge = badge && !this._snapshotting &&
+                (isLive || (live && live.canGoLive(obj)));
+            const showMuted = showBadge && live && live.isMuted(obj);
+            if (showBadge) this._drawLiveBadge(ctx, badge, isLive);
+            if (showMuted) this._drawMutedGlyph(ctx, badge);
+
             const label = obj.webBrowser.title || obj.webBrowser.url || "";
             if (label) {
                 ctx.font = "12px system-ui, sans-serif";
                 ctx.fillStyle = this._mutedColor();
                 ctx.textBaseline = "middle";
                 ctx.textAlign = "left";
+                const room = obj.w - 18 - (showBadge ? badge.w + 8 : 0)
+                    - (showMuted ? badge.h * 0.62 + 6 : 0);
                 ctx.fillText(
-                    this._ellipsize(ctx, label, obj.w - 18), obj.x + 9, obj.y + barHeight / 2
+                    this._ellipsize(ctx, label, room), obj.x + 9, obj.y + barHeight / 2
                 );
             }
 
-            if (!(this.host.live && this.host.live.showsTile(obj.id)) || this._snapshotting) {
+            // Three states, not two. A web tile has no screenshot to fall back on, so
+            // whatever the tile is not painting, this has to say something about.
+            if (!showsTile) {
                 ctx.font = "13px system-ui, sans-serif";
-                ctx.fillStyle = this._withAlpha(this._mutedColor(), 0.7);
+                ctx.fillStyle = this._withAlpha(this._mutedColor(), isLive ? 0.45 : 0.7);
                 ctx.textAlign = "center";
                 ctx.textBaseline = "middle";
-                ctx.fillText("Click to load this page",
+                ctx.fillText(isLive ? "Running" : "Click to load this page",
                     obj.x + obj.w / 2, obj.y + barHeight + (obj.h - barHeight) / 2);
             }
 

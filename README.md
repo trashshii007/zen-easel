@@ -16,9 +16,12 @@ Requires the forked [Zen Libary](https://github.com/trashshii007/Zen-Library).
 
 ## Opening a board
 
-`Ctrl+Shift+E`, the toolbar button, or the **Easels** section of the Zen Library. Boards
-open in an ordinary tab — they get a title and favicon, `Ctrl+W` closes one, and a
-restored session reopens the board you were on.
+`Ctrl+Shift+E`, the toolbar button, or the **Easels** section of the Zen Library.
+
+**Each board opens in its own tab.** Picking one from the switcher opens or focuses that
+board's tab rather than replacing the board you are on, so you can keep several open,
+reorder them, and split two against each other like any other pair of tabs. Boards get a
+tab title and favicon, `Ctrl+W` closes one, and a restored session reopens what you had.
 
 Every board opens with a heading at the top. It is a text box, and it is also the
 board's name: rename it anywhere and the tab, switcher and library card follow.
@@ -132,9 +135,27 @@ Right-click always gets the easel's menu, and the title strip doubles as the dra
 tile…**. Unlike live cards they scroll, text in them can be selected, and forms submit.
 YouTube links dropped or pasted become 16:9 embed players.
 
-Both are opt-in, capped at three at once, and torn down when they scroll out of view or
-the tab is backgrounded. Cards always open as screenshots. Links inside either open in a
-normal tab. `zen.easel.live.enabled = false` is a hard off switch.
+Once a card is live it **stays running**. Scrolling it off the board, switching to another
+easel, switching tabs and minimising the window all stop it *painting*, not running — so a
+dashboard you left open is still current when you come back, rather than a stale
+screenshot.
+
+A card you cannot see for **30 minutes** stops on its own (`live.idle-timeout-min`; `0` to
+never). Only out-of-sight cards age: one on screen, or one playing audio, never times out.
+A card that does times out goes back to its screenshot, and one click starts it again.
+
+Press **❚❚** to stop one for real. The count in the top bar shows how many are running in
+the window, including any on boards you do not have open; click it to see them, stop one,
+or **Stop all live cards**.
+
+Closing a board's tab stops that board's cards, and `Ctrl+R` stops them too — a reload
+starts the board over, websites included. Closing Zen stops everything.
+
+Both are opt-in and capped — twelve at once by default (`live.max-tiles`; `0` for no cap),
+because each live card is a separate content process. Cards always open as screenshots.
+Background cards keep playing audio if they were already playing, and never start on their
+own; **Mute this card** in the right-click menu overrides that per card. Links inside
+either open in a normal tab. `zen.easel.live.enabled = false` is a hard off switch.
 
 ## Dropping things on the canvas
 
@@ -180,7 +201,9 @@ In Zen's mod preferences, or `about:config`:
 | `zen.easel.snap` | `guides` | `guides`, `grid`, or `none`. Hold `Alt` to suppress |
 | `zen.easel.grid-size` | `24` | canvas pixels, for `snap: grid` |
 | `zen.easel.live.enabled` | `true` | off means no easel ever loads a website |
-| `zen.easel.live.max-tiles` | `3` | how many cards may be live at once |
+| `zen.easel.live.max-tiles` | `12` | how many cards may be live at once; `0` for no cap |
+| `zen.easel.live.idle-timeout-min` | `30` | stop a card after this long out of sight; `0` for never |
+| `zen.easel.live.reveal-delay-ms` | `140` | pause before showing live cards again after a tab switch |
 | `zen.easel.live.private` | `false` | load live cards in a private session |
 | `zen.easel.live.container` | `0` | container ID for live cards; `0` is your normal session |
 | `zen.easel.live.allow-http` | `false` | allow live cards over plain http |

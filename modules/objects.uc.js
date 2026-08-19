@@ -654,6 +654,9 @@
             obj.webcard.url = safeExternalUrl(obj.webcard.url) || "";
             obj.webcard.capture = sanitizeCapture(obj.webcard.capture);
             obj.webcard.useLiveWebCard = obj.webcard.useLiveWebCard === true;
+            // Unlike useLiveWebCard this one *is* honoured on load, because the only thing
+            // it can do is make a board quieter.
+            obj.webcard.muted = obj.webcard.muted === true;
             // Needs either pixels or a link; with neither there is nothing to show.
             if (!obj.webcard.asset && !obj.webcard.url) return null;
         } else if (obj.type === "webBrowser") {
@@ -664,6 +667,7 @@
             obj.webBrowser.url = safeExternalUrl(obj.webBrowser.url) || "";
             if (!obj.webBrowser.url) return null;
             if (typeof obj.webBrowser.title !== "string") obj.webBrowser.title = "";
+            obj.webBrowser.muted = obj.webBrowser.muted === true;
         }
 
         return obj;

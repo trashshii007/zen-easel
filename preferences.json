@@ -110,9 +110,25 @@
     "type": "string",
     "value": "number",
     "property": "zen.easel.live.max-tiles",
-    "label": "How many cards may be live at once. Cards that scroll out of view revert to their screenshot, and every card on the board tears down when the easel tab is in the background.",
-    "defaultValue": 3,
-    "placeholder": "3"
+    "label": "How many cards may be live at once, across every board in a window. 0 means no limit. A live card keeps running — scrolling away, switching easel and backgrounding the tab all stop it painting, not running — so this is the ceiling on how many websites an easel can be keeping alive. Each one is a separate content process. Over the limit, the least recently used card you cannot currently see is stopped first.",
+    "defaultValue": 12,
+    "placeholder": "12"
+  },
+  {
+    "type": "string",
+    "value": "number",
+    "property": "zen.easel.live.idle-timeout-min",
+    "label": "Stop a live card after this many minutes out of sight. 0 means never. Only cards you cannot see are counted — one on screen, or one playing audio, never times out however long it has been there. A card that does revert to its screenshot, and one click starts it again.",
+    "defaultValue": 30,
+    "placeholder": "30"
+  },
+  {
+    "type": "string",
+    "value": "number",
+    "property": "zen.easel.live.reveal-delay-ms",
+    "label": "How long to wait before showing live cards again after switching back to an easel. A live card is not part of the tab-switch animation, so revealing it while that is still playing makes it appear to fly in separately. The card's screenshot is shown throughout the wait. Raise it if your tab animations are slower; 0 shows them immediately.",
+    "defaultValue": 140,
+    "placeholder": "140"
   },
   {
     "type": "checkbox",
@@ -154,6 +170,29 @@
     "label": "Where easels are stored. Leave empty to use zen-easels inside your profile folder.",
     "defaultValue": "",
     "placeholder": "(profile)/zen-easels"
+  },
+
+  {
+    "type": "separator",
+    "label": "Split view — a Zen workaround",
+    "margin": "20px 0 10px 0"
+  },
+  {
+    "type": "text",
+    "label": "Dragging a split divider misbehaves when an about: page is in the split — the divider snaps to one side and stops following the pointer, and at speed the panes strobe. about:preferences and about:config do it too, in a stock profile. Mouse events coming from those pages are measured from the page's own corner rather than the window's, so the divider is told the pointer is somewhere it is not.",
+    "size": "12px",
+    "margin": "0 0 8px 0"
+  },
+  {
+    "type": "dropdown",
+    "property": "zen.easel.split-resize",
+    "label": "How a split divider behaves while you drag it. Set this to Off when Zen fixes the flicker upstream.",
+    "defaultValue": "ghost",
+    "options": [
+      { "value": "ghost", "label": "Move a guide line, resize on release (fixes both)" },
+      { "value": "freeze", "label": "Resize live, hold the page still (no strobe, snapping remains)" },
+      { "value": "off", "label": "Off — Zen's own behaviour" }
+    ]
   },
 
   {

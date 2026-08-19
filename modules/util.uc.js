@@ -36,9 +36,12 @@
         "autosave-ms": ["int", 500],
         "debug": ["bool", false],
         "live.enabled": ["bool", true],
-        "live.max-tiles": ["int", 3],
+        "live.max-tiles": ["int", 12],
+        "live.idle-timeout-min": ["int", 30],
+        "live.reveal-delay-ms": ["int", 140],
         "live.allow-http": ["bool", false],
         "live.container": ["int", 0],
+        "split-resize": ["str", "ghost"],
         "live.private": ["bool", false]
     };
 

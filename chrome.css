@@ -143,3 +143,28 @@
     transition: none;
   }
 }
+
+/* ------------------------------------------------- split-view flicker workaround */
+
+/* Both paired with modules-host/split-resize.uc.js, and both inert unless it is doing
+ * something: neither selector can match while the "Split view" setting is Off. */
+
+/* The guide line the ghost mode drags in place of the panes. Fixed rather than positioned
+ * inside the panel, because it is measured from the pointer, which is in client
+ * coordinates; and above the content but below Zen's own panels and menus. */
+.zen-easel-split-ghost {
+  position: fixed;
+  z-index: 9;
+  pointer-events: none;
+  border-radius: 2px;
+  background-color: var(--zen-primary-color, AccentColor);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25);
+  opacity: 0.9;
+}
+
+/* Freeze mode pins each in-process pane to its pre-drag pixel size, so a pinned page is
+ * larger than its pane whenever the drag is making that pane smaller. The pane has to clip
+ * it — without this it paints over its neighbour and over Zen's sidebar. */
+#tabbrowser-tabpanels[zen-easel-split-frozen] .browserSidebarContainer {
+  overflow: hidden;
+}
