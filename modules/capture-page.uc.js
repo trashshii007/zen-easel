@@ -53,7 +53,14 @@
             // The geometry that makes a live web card possible. Only present for captures
             // taken since this shipped; an older card simply is not live-capable, which
             // live-layer.uc.js checks for rather than assuming.
+            //
+            // Its absence is worth a line in the console. A card with no geometry looks
+            // identical to one with it until you right-click and find no "Show live
+            // website", and the reason is on the window's side of the bridge, where nothing
+            // on this side would ever see it.
             if (result.capture) webcard.capture = result.capture;
+            else this.log("this capture carries no viewport geometry, so the card it makes " +
+                "cannot be shown live \u2014 see the warning from the browser window for why");
 
             const obj = window.ZenEaselObjects.createObject("webcard", {
                 x: at.x, y: at.y, w: size.w, h: size.h,

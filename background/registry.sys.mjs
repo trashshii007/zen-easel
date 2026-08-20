@@ -106,72 +106,22 @@ export function unregister() {
 
 /* ---------------------------------------------------------------- actors */
 
-const ACTOR_BASE = "chrome://sine/content/zen-easel/actors/";
+// The definitions moved to actors.sys.mjs, and the move is load-bearing: a window script
+// has to be able to install them over a stale registration, and it cannot do that through
+// this module, because this module is exactly the thing that goes stale. See the header
+// there. Everything here is now a thin pass-through so there is still one place that
+// registers actors at boot.
+const { ensureActor, ensureActors, removeActors } =
+    ChromeUtils.importESModule("chrome://sine/content/zen-easel/background/actors.sys.mjs");
 
-// ChromeUtils.registerWindowActor is process-global, exactly like the component
-// registrar, and for the same reason both live in this file.
-export function registerActors() {
-    // The live-tile actor. messageManagerGroups is the security-critical line: it scopes
-    // the actor to browsers carrying messagemanagergroup="zen-easel-live", which only
-    // live-layer.uc.js sets. Without it, this would attach a scroll-eating,
-    // click-intercepting actor to every page in the browser.
-    //
-    // mozSystemGroup on the input events is what makes the locks unbypassable — a page
-    // calling stopPropagation() in the default group cannot reach the system group.
-    ChromeUtils.registerWindowActor("ZenEaselLive", {
-        parent: { esModuleURI: `${ACTOR_BASE}ZenEaselLiveParent.sys.mjs` },
-        child: {
-            esModuleURI: `${ACTOR_BASE}ZenEaselLiveChild.sys.mjs`,
-            events: {
-                DOMContentLoaded: {},
-                pageshow: {},
-                // The last point the document's height changes for reasons unrelated to
-                // script, so the crop gets one more assertion there. createActor:false
-                // for the same reason as scroll: it must not be what brings the actor
-                // into existence on a page that never went live.
-                load: { createActor: false },
-                wheel: { capture: true, mozSystemGroup: true },
-                touchmove: { capture: true, mozSystemGroup: true },
-                keydown: { capture: true, mozSystemGroup: true },
-                selectstart: { capture: true, mozSystemGroup: true },
-                click: { capture: true, mozSystemGroup: true },
-                auxclick: { capture: true, mozSystemGroup: true },
-                contextmenu: { capture: true, mozSystemGroup: true },
-                submit: { capture: true, mozSystemGroup: true },
-                scroll: { capture: true, mozSystemGroup: true, createActor: false }
-            }
-        },
-        // messageManagerGroups is the scoping that matters: it matches the attribute only
-        // live-host.uc.js sets, so this actor attaches to easel tiles and to nothing else
-        // in the browser.
-        //
-        // remoteTypes is deliberately absent. It used to say ["web"], which looks harmless
-        // and silently disabled every lock in this actor: under Fission web content does
-        // not run in a process called "web", it runs in "webIsolated=https://example.com",
-        // and remoteTypes matches the string exactly. The actor therefore never attached to
-        // a single tile — no scroll lock, no selection lock, no link interception, and no
-        // context-menu hand-back. Firefox's own actors in this build do not use remoteTypes
-        // either.
-        messageManagerGroups: ["zen-easel-live"],
-        allFrames: true
-    });
-
-    // The capture-measurement actor has to reach ordinary tabs, so its group is the
-    // default "browsers". It is inert at rest: with no events and no observers declared,
-    // the child is never instantiated until the parent calls getActor(), which happens
-    // once per capture.
-    ChromeUtils.registerWindowActor("ZenEaselCapture", {
-        parent: { esModuleURI: `${ACTOR_BASE}ZenEaselCaptureParent.sys.mjs` },
-        child: { esModuleURI: `${ACTOR_BASE}ZenEaselCaptureChild.sys.mjs` },
-        messageManagerGroups: ["browsers"],
-        allFrames: true
-    });
+// `only` names a single actor; omitted, every one is installed.
+export function registerActors(only = null) {
+    if (only) ensureActor(only);
+    else ensureActors();
 }
 
 export function unregisterActors() {
-    for (const name of ["ZenEaselLive", "ZenEaselCapture"]) {
-        try { ChromeUtils.unregisterWindowActor(name); } catch (e) { }
-    }
+    removeActors();
 }
 
 /* ----------------------------------------------------------------- boot */
