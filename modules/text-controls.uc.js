@@ -246,6 +246,9 @@
             this._panel = { element: panel, anchor, kind };
             anchor.classList.add("is-open");
             this._positionPanel(parseFloat(this._element.style.left) || 0);
+            // Opening one moves nothing on the board, so nothing else would tell the live
+            // layer there is a new panel to keep its tiles out from under.
+            this.host.chromeChanged();
 
             this._dismiss = event => {
                 const path = event.composedPath();
@@ -278,6 +281,7 @@
             this._panel.element.remove();
             this._panel.anchor.classList.remove("is-open");
             this._panel = null;
+            this.host.chromeChanged();
             if (this._dismiss) {
                 this.host.shadowRoot.removeEventListener("pointerdown", this._dismiss, true);
                 this._dismiss = null;

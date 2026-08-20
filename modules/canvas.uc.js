@@ -94,6 +94,30 @@
             this._hiddenId = null;            // skipped by both: the textarea is showing it
             this._marquee = null;             // screen-space rect
 
+            // What the pointer is resting on: the object under it, and which control of
+            // that object's floating bar, if any. Drives both the accent glow on the
+            // overlay and the bar the host is asked to show.
+            this._hoverId = null;
+            this._hoverPart = null;
+            // The last pointer position, so hover can be re-derived without a move event —
+            // which is exactly the case when an activated live tile hands the pointer back.
+            this._hoverScreen = null;
+            // The last spec handed to the host, compared before sending so a board that is
+            // merely being panned does not cross the bridge once a frame; and the object
+            // whose bar that spec put on screen, which is a different question from which
+            // object the pointer is over. The bar is drawn in the browser window and the
+            // clicks are hit-tested here, so this is what keeps the two honest: a control
+            // answers only while the bar carrying it is one the user can see.
+            this._chromeSent = null;
+            this._chromeShown = null;
+            // The board colours that spec carries, cached because reading them flushes
+            // style. Dropped by _applyBackground, which is what writes them.
+            this._chromeTheme = null;
+            // An opacity drag is holding one mutation open across the whole gesture. Declared
+            // rather than left to spring into existence on the first slider event, so the
+            // field reads the same as every other piece of state here.
+            this._opacityLive = false;
+
             this._paint = window.ZenEaselUtil.throttleRAF(() => this._paintNow());
             // Owned by the canvas rather than the host: guides exist only for the
             // duration of a drag, and the drag lives here.
@@ -115,6 +139,7 @@
             this._onPointerDown = this._onPointerDown.bind(this);
             this._onPointerMove = this._onPointerMove.bind(this);
             this._onPointerUp = this._onPointerUp.bind(this);
+            this._onPointerLeave = this._onPointerLeave.bind(this);
             this._onWheel = this._onWheel.bind(this);
             this._onDblClick = this._onDblClick.bind(this);
             this._onContextMenu = this._onContextMenu.bind(this);
@@ -130,6 +155,11 @@
             this.root.addEventListener("pointermove", this._onPointerMove);
             this.root.addEventListener("pointerup", this._onPointerUp);
             this.root.addEventListener("pointercancel", this._onPointerUp);
+            // The bar has to go when the pointer does. Without this it would be left
+            // showing over the last card touched for as long as the pointer stayed off the
+            // board — and since the bar is drawn in the browser window, that is a control
+            // floating over a page nobody is pointing at.
+            this.root.addEventListener("pointerleave", this._onPointerLeave);
             // Non-passive: wheel zoom must be preventDefault-able or Zen zooms its own
             // UI out from under the canvas.
             this.root.addEventListener("wheel", this._onWheel, { passive: false });
@@ -207,6 +237,11 @@
         }
 
         destroy() {
+            // The bar is an element in the browser window, so it does not go when this
+            // document does — it has to be dismissed, or it is left floating over whatever
+            // the tab shows next.
+            this._dismissCardChrome();
+            this.endOpacityDrag();
             this._paint.cancel();
             if (this._resizeSettleTimer) window.clearTimeout(this._resizeSettleTimer);
             if (this._resizeObserver) this._resizeObserver.disconnect();
@@ -214,6 +249,7 @@
             this.root.removeEventListener("pointermove", this._onPointerMove);
             this.root.removeEventListener("pointerup", this._onPointerUp);
             this.root.removeEventListener("pointercancel", this._onPointerUp);
+            this.root.removeEventListener("pointerleave", this._onPointerLeave);
             this.root.removeEventListener("wheel", this._onWheel);
             this.root.removeEventListener("dblclick", this._onDblClick);
             this.root.removeEventListener("contextmenu", this._onContextMenu);
@@ -228,6 +264,16 @@
         /* ------------------------------------------------------------ document */
 
         setDocument(doc) {
+            // Before this.doc moves, so the dismissal is addressed to the board that is
+            // actually showing the bar. Sending it afterwards would name the incoming board
+            // and leave the outgoing one's bar on screen.
+            this._dismissCardChrome();
+            // And before the undo stack is dropped below. A slider drag holds one mutation
+            // open across the gesture, and the toolbar popup only closes it when the popup
+            // itself goes; a board switched out from under an open drag would leave it
+            // open, so the first edit on the *new* board would commit against the old
+            // board's snapshot.
+            this.endOpacityDrag();
             this.doc = doc;
             // Before anything below can schedule a frame — renderer.resize() and
             // _clampView() both can. sync() runs from the paint loop and sweeps tiles whose
@@ -336,28 +382,163 @@
             if (this.host.store) this.host.store.markDirty();
         }
 
-        /* --------------------------------------------------- live play / pause */
+        /* ------------------------------------------------------- card hover chrome */
 
-        // Hit-tested in world space against the same rect the renderer drew, so the two
-        // cannot drift apart. A small pad keeps it clickable at low zoom, where the badge
-        // is only a few device pixels across.
-        _hitLiveBadge(obj, world) {
-            const live = this.host.live;
-            if (!live) return false;
-            if (!live.isLive(obj.id) && !live.canGoLive(obj)) return false;
+        // Which part of the floating card bar the pointer is on: "play", "link", "bar" for
+        // the strip behind them, or null for anywhere else on the card.
+        //
+        // "bar" is a target in its own right because the bar is the card's drag handle. A
+        // live tile is a <browser> over the whole card, so the moment one is activated the
+        // board stops seeing the pointer at all; the bar is the part that is still the
+        // easel's, and it is the only place a press can mean "move this" rather than
+        // "hand the pointer to the site".
+        //
+        // Hit-tested in world space against the same rects the bar is *laid out* from, so
+        // the two cannot drift apart — the bar itself is DOM in the browser window, because
+        // a live card's <browser> covers every canvas this page owns, but its geometry stays
+        // in the renderer and this is the only reader that matters. A small pad keeps the
+        // buttons clickable at low zoom, where they are only a few device pixels across.
+        _hitChrome(obj, world) {
+            const chrome = this._chromeFor(obj);
+            if (!chrome) return null;
 
-            const rect = this.renderer.liveBadgeRect(obj);
-            if (!rect) return false;
-
-            // Same local-frame trick the object hit test uses: the badge is drawn inside
-            // the object's rotated context, so the pointer is taken back out of that
-            // rotation rather than the rectangle being rotated to meet it.
+            // Same local-frame trick the object hit test uses: the bar is laid out inside
+            // the object's rotated frame, so the pointer is taken back out of that rotation
+            // rather than the rectangles being rotated to meet it.
             const point = this.Objects.toLocal(obj, world.x, world.y);
-
             const pad = 4 / this.view.zoom;
-            return point.x >= rect.x - pad && point.x <= rect.x + rect.w + pad &&
+            const inside = rect => rect &&
+                point.x >= rect.x - pad && point.x <= rect.x + rect.w + pad &&
                 point.y >= rect.y - pad && point.y <= rect.y + rect.h + pad;
+
+            if (inside(chrome.rects.play)) return "play";
+            if (inside(chrome.rects.link)) return "link";
+            // Unpadded, unlike the buttons: the bar's edge is where the card's own surface
+            // begins, and padding this one would take a strip of the picture with it.
+            const bar = chrome.rects.bar;
+            if (bar && point.x >= bar.x && point.x <= bar.x + bar.w &&
+                point.y >= bar.y && point.y <= bar.y + bar.h) return "bar";
+            return null;
         }
+
+        // The bar this object would wear, as one answer: which buttons it carries and where
+        // everything sits given those. One computation, because the buttons are packed
+        // against the bar's right edge — working out the rects and *then* deciding which
+        // buttons exist would put every one of them in the wrong place.
+        //
+        // Null when the object wears no bar at all: not a web card, too small to carry one,
+        // or carrying neither control, which would leave a title floating over a picture
+        // that already shows what it is.
+        _chromeFor(obj) {
+            if (!obj || (obj.type !== "webcard" && obj.type !== "webBrowser")) return null;
+
+            const canToggle = this._canToggleLive(obj);
+            const url = this._chromeUrl(obj);
+            if (!canToggle && !url) return null;
+
+            const rects = this.renderer.webcardChromeRects(obj, { play: canToggle, link: !!url });
+            return rects ? { rects, canToggle, url } : null;
+        }
+
+        // The play/pause button is only offered for a card that can actually do something
+        // with it — one already running, or one with the capture geometry a live mount
+        // needs. An older capture simply is not live-capable and gets a bar with one button.
+        _canToggleLive(obj) {
+            const live = this.host.live;
+            return !!live && (live.isLive(obj.id) || live.canGoLive(obj));
+        }
+
+        _chromeUrl(obj) {
+            const raw = obj.type === "webcard"
+                ? obj.webcard && obj.webcard.url
+                : obj.webBrowser && obj.webBrowser.url;
+            return this.Objects.safeExternalUrl(raw) || "";
+        }
+
+        // Hover is the whole interaction, so it is worth being exact about when there is
+        // none. A drag, a drawing tool, an open text editor and the activated live tile all
+        // mean the pointer is committed to something else — and in the last case the tile
+        // has literally taken the pointer, so no move event reaches here anyway and the bar
+        // would otherwise be left showing at whatever position it was last told.
+        _updateHover(e) {
+            if (!this.doc) return;
+
+            const screen = this._screenPoint(e);
+            this._hoverScreen = screen;
+            this._applyHoverAt(screen);
+        }
+
+        _applyHoverAt(screen) {
+            let id = null;
+            let part = null;
+
+            const editing = this.host.textEditor && this.host.textEditor.isEditing;
+            const activeId = this.host.live ? this.host.live.activeId : null;
+
+            const tool = this.host.tools ? this.host.tools.active : "pointer";
+
+            if (screen && !this._drag && !editing && tool === "pointer") {
+                const world = this.toWorld(screen.x, screen.y);
+                const hit = this._hitTest(world.x, world.y);
+                if (hit && hit.id !== activeId) {
+                    id = hit.id;
+                    part = this._hitChrome(hit, world);
+                }
+            }
+
+            if (id === this._hoverId && part === this._hoverPart) return;
+            this._hoverId = id;
+            this._hoverPart = part;
+            // Overlay only — the glow and the bar both ride on state that is rebuilt every
+            // frame, so the committed scene does not need repainting for a hover.
+            this.invalidateOverlay();
+        }
+
+        // Drops the hover *result* but keeps the record of where the pointer is, which are
+        // two different things. Activating a live tile clears the result — the site owns the
+        // pointer and the bar has to go — but the pointer has not gone anywhere, and Escape
+        // has to be able to work out what it is back on top of without waiting for a nudge
+        // of the mouse. Only pointerleave, where the pointer really has left, drops both.
+        clearHover() {
+            if (this._hoverId === null && this._hoverPart === null) return;
+            this._hoverId = null;
+            this._hoverPart = null;
+            this.invalidateOverlay();
+        }
+
+        // Whether the host is currently holding a bar for this board. Read by live-layer,
+        // which measures this page's chrome only when the host has something in its layer
+        // to keep out from under it.
+        isShowingCardChrome() {
+            return this._chromeShown !== null;
+        }
+
+        // Whether the hover state should be acted on at all, asked on the frame it is drawn
+        // rather than only when the pointer last moved. Opening the text editor or starting
+        // a drag does not move the pointer, so a check made only in _updateHover would leave
+        // the halo and the bar sitting there until the mouse was nudged.
+        _hoverActive() {
+            if (this._hoverId === null) return false;
+            // A drag means the pointer is committed to something other than picking — with
+            // one exception, which is the drag the bar itself started. The bar is the handle
+            // being held, so taking it off screen the instant it is used would be pulling
+            // the control out from under the pointer, and the card would appear to be
+            // dragged by nothing.
+            if (this._drag && !this._drag.fromChrome) return false;
+            if (this.host.textEditor && this.host.textEditor.isEditing) return false;
+            return true;
+        }
+
+        // Re-derives hover from the last known pointer position, for the changes that make
+        // the answer different without moving the pointer: an activated tile handing it back
+        // (Escape), and arming or leaving a drawing tool. In each case no event is coming to
+        // say what the pointer is now resting on, so the halo and the bar would otherwise
+        // stay as they were until the mouse was nudged.
+        refreshHover() {
+            this._applyHoverAt(this._hoverScreen);
+        }
+
+        /* --------------------------------------------------- live play / pause */
 
         _toggleLive(obj) {
             const live = this.host.live;
@@ -622,6 +803,159 @@
                 // than a layout invalidation per frame.
                 this.host.library.updateLiveCount();
             }
+            // After live.sync(), so the bar is placed against the same frame's geometry as
+            // the tile it may be sitting on.
+            this._syncCardChrome();
+        }
+
+        /* -------------------------------------------------- floating card chrome */
+
+        // Hands the host the one bar it should be showing, or null for none.
+        //
+        // The bar is DOM in the browser window rather than something this canvas paints,
+        // because a live card's <browser> covers every layer this document owns — see
+        // modules-host/live-host.uc.js. It is drawn there and hit-tested here, which works
+        // because a tile takes no pointer events until it has been activated, and an
+        // activated tile is exactly the case where the bar should not be showing anyway.
+        //
+        // At most one exists at a time: there is one pointer, so there is one hover.
+        _syncCardChrome() {
+            const spec = this._cardChromeSpec();
+
+            // Compared as a serialised value rather than by identity, because this runs
+            // every frame and a board being panned would otherwise cross the bridge sixty
+            // times a second to say the same thing.
+            const token = spec ? JSON.stringify(spec) : null;
+            if (token === this._chromeSent) return;
+
+            const bridge = this.host.bridge;
+            const easelId = this.doc ? this.doc.id : null;
+            // Remembered only once it has actually gone somewhere — the same trap
+            // live-layer's _chromeClip fell into. Recording a send that never happened
+            // leaves the token matching for ever afterwards, so the bar would stay missing
+            // until the pointer moved to a different card.
+            if (!bridge || !easelId) {
+                this._chromeSent = null;
+                this._chromeShown = null;
+                return;
+            }
+            const wasShowing = this._chromeShown !== null;
+            this._chromeSent = token;
+            this._chromeShown = spec ? spec.objectId : null;
+            bridge.liveShowChrome(easelId, spec);
+
+            // The bar rides inside the host's tile layer, which is clipped where this page's
+            // own chrome is — and live.sync() skips measuring that while there is nothing in
+            // the layer to keep off the toolbar. Appearing is exactly the moment there
+            // starts to be, and it happens after this frame's sync, so it has to say so.
+            if (!wasShowing && this._chromeShown !== null) this.host.live?.syncChromeClip();
+        }
+
+        // Takes the bar down and forgets it was ever up, so the next _syncCardChrome sends
+        // afresh rather than comparing against a spec the host no longer holds. For the
+        // paths that end this view rather than merely change what is under the pointer:
+        // teardown, and switching to another board.
+        _dismissCardChrome() {
+            const easelId = this.doc ? this.doc.id : null;
+            this._chromeSent = null;
+            this._chromeShown = null;
+            this._hoverId = null;
+            this._hoverPart = null;
+            this._hoverScreen = null;
+            const bridge = this.host.bridge;
+            if (bridge && easelId) bridge.liveShowChrome(easelId, null);
+        }
+
+        _cardChromeSpec() {
+            if (!this.doc || !this._hoverActive()) return null;
+
+            const obj = this._byId(this._hoverId);
+            if (!obj) return null;
+
+            const chrome = this._chromeFor(obj);
+            if (!chrome) return null;
+            const { rects, canToggle, url } = chrome;
+
+            const live = this.host.live;
+            const isLive = !!live && live.isLive(obj.id);
+            const source = obj.type === "webcard" ? obj.webcard : obj.webBrowser;
+            const zoom = this.view.zoom;
+
+            // toScreen is relative to the *viewport element*; the host's layer is placed over
+            // the whole tab, because that is the element whose position it can observe. The
+            // topbar sits between the two, and a bar sent without this lands exactly that
+            // much too high — which looks like a scale error, because a fixed offset is
+            // glaring on a small card and easy to miss on a zoomed-in one. It is not: it is
+            // the same seam every tile crosses. live.viewportOrigin() is the one definition.
+            const origin = live ? live.viewportOrigin() : { x: 0, y: 0 };
+            const local = this.toScreen(rects.bar.x, rects.bar.y);
+            const topLeft = { x: local.x + origin.x, y: local.y + origin.y };
+
+            const theme = this._chromeThemeValues();
+
+            return {
+                objectId: obj.id,
+                // Tab space — the same coordinates _geometryFor sends for a tile, and what
+                // the host's layer is laid out in.
+                rect: {
+                    x: topLeft.x,
+                    y: topLeft.y,
+                    w: rects.bar.w * zoom,
+                    h: rects.bar.h * zoom
+                },
+                // World units. The host lays the bar's contents out at this size and scales
+                // the result, so the bar magnifies with the board instead of staying a fixed
+                // number of screen pixels on a card you have zoomed into — and so its
+                // padding and type sizes can be plain numbers in the stylesheet.
+                size: { w: rects.bar.w, h: rects.bar.h },
+                scale: zoom,
+                // The bar is laid out inside the object's frame, so a tilted card carries it
+                // along at the same angle its tile is drawn at. Turned about the *object's*
+                // centre rather than its own — same as a tile, and for the same reason: the
+                // bar covers only part of the card, so its own centre is the wrong hinge.
+                rotation: obj.rotation || 0,
+                pivot: {
+                    x: (obj.x + obj.w / 2 - rects.bar.x) * zoom,
+                    y: (obj.y + obj.h / 2 - rects.bar.y) * zoom
+                },
+                title: (source && source.title) || url || "",
+                favicon: (obj.type === "webcard" && source && source.favicon) || "",
+                url,
+                // Which parts the bar has room for. Derived from the rects rather than
+                // recomputed, so the element the host builds is packed exactly as the
+                // rectangles this side hit-tests against — a narrow card drops its title,
+                // and the buttons move left in both places or in neither.
+                showFavicon: !!rects.favicon,
+                showLabel: !!rects.label,
+                canToggle,
+                state: isLive ? "pause" : "play",
+                muted: !!(live && live.isMuted(obj)),
+                hoverPart: this._hoverPart,
+                tint: theme.tint,
+                ink: theme.ink,
+                accent: theme.accent
+            };
+        }
+
+        // The board's own colour and accent, so the bar follows a switch from Paper to Ink
+        // the way the easel's own panels do. Read from the host element, which is where
+        // _syncZenColors and _applyBackground both write — the browser window has no way to
+        // see either.
+        //
+        // Cached, because the caller runs on every painted frame while the pointer rests on
+        // a card and getComputedStyle flushes style to answer. These three change when the
+        // board's background does and at no other time, so _applyBackground drops the cache
+        // and nothing else has to think about it.
+        _chromeThemeValues() {
+            if (this._chromeTheme) return this._chromeTheme;
+            const style = window.getComputedStyle(this.host);
+            const readVar = name => (style.getPropertyValue(name) || "").trim();
+            this._chromeTheme = {
+                tint: readVar("--easel-tint"),
+                ink: this.host.getAttribute("data-easel-ink") || "",
+                accent: readVar("--easel-accent")
+            };
+            return this._chromeTheme;
         }
 
         _overlayState() {
@@ -638,14 +972,19 @@
             // back for as long as that lasts.
             const selected = this._selected().filter(obj => !(live && live.showsTile(obj.id)));
 
-            if (!selected.length) {
-                return { marquee: this._marquee, selection: [], frame: null, editing, guides, rotation: 0 };
-            }
-
             const toScreenBox = box => {
                 const tl = this.toScreen(box.x, box.y);
                 return { x: tl.x, y: tl.y, w: box.w * this.view.zoom, h: box.h * this.view.zoom };
             };
+
+            const hover = this._hoverOverlay(toScreenBox);
+
+            if (!selected.length) {
+                return {
+                    marquee: this._marquee, selection: [], frame: null,
+                    editing, guides, rotation: 0, hover
+                };
+            }
 
             return {
                 marquee: this._marquee,
@@ -653,7 +992,27 @@
                 frame: toScreenBox(this.Objects.unionBounds(selected)),
                 editing,
                 guides,
-                rotation: this._selectionRotation(selected)
+                rotation: this._selectionRotation(selected),
+                hover
+            };
+        }
+
+        // The accent halo under the pointer, in screen space, or null.
+        //
+        // Withheld for a selected object: the transform frame already says which one you
+        // are on, and two rings around the same box is noise. Withheld during a drag for
+        // the same reason — the thing is moving, that is feedback enough — and while a
+        // drawing tool is up, where the pointer is a crosshair and nothing is being picked.
+        _hoverOverlay(toScreenBox) {
+            if (!this._hoverActive()) return null;
+            if (this.selection.has(this._hoverId)) return null;
+
+            const obj = this._byId(this._hoverId);
+            if (!obj) return null;
+
+            return {
+                box: toScreenBox(this.Objects.bounds(obj)),
+                rotation: obj.rotation || 0
             };
         }
 
@@ -792,7 +1151,9 @@
 
         /* ---------------------------------------------------------- background */
 
-        get background() { return (this.doc && this.doc.background) || "arc"; }
+        get background() {
+            return (this.doc && this.doc.background) || this.Objects.DEFAULT_BACKGROUND;
+        }
 
         setBackground(key) {
             if (!this.doc) return;
@@ -820,10 +1181,16 @@
         //
         // This mod's own model is the fixed one: a 3600-unit page, with fit-width as the
         // zoom-out limit. At fit-width the two look the same, and they part company as soon
-        // as you resize the window — so the mode is per easel, defaulting to fixed, and the
-        // two can be judged side by side rather than one being asserted over the other.
+        // as you resize the window — so the mode is per easel and either one is a click
+        // away in the board menu.
+        //
+        // New easels start in verticallyScrolling: a board that is exactly the window is
+        // what someone opening a blank easel expects, and the fixed sheet only earns its
+        // keep once there is enough on the board to want a page wider than the view.
+        // Boards saved before this default changed keep whatever they have on disk.
         get canvasMode() {
-            return (this.doc && this.doc.canvasMode) === "verticallyScrolling"
+            if (!this.doc || !this.doc.canvasMode) return this.Objects.DEFAULT_CANVAS_MODE;
+            return this.doc.canvasMode === "verticallyScrolling"
                 ? "verticallyScrolling" : "fixed";
         }
 
@@ -937,6 +1304,9 @@
         _applyBackground() {
             const preset = this.Objects.BACKGROUND_BY_KEY.get(this.background);
             this.root.style.backgroundColor = preset && preset.css ? preset.css : "";
+            // This method and the tail of it are where every value the floating card bar
+            // borrows is written, so this is the one place that has to drop the cache.
+            this._chromeTheme = null;
 
             // Nothing behind the tint may paint, or the alpha buys nothing: the shadow
             // root's .easel-root and the page's <body> are both permanently transparent
@@ -1111,10 +1481,22 @@
 
         // Top-most first: the array is in z order, so a reverse walk returns whatever
         // the user visually clicked rather than whatever was drawn first.
-        _hitTest(wx, wy) {
+        //
+        // A locked object is skipped, which is the whole of what locking does to the
+        // pointer. Everything that treats a click as landing on something — hover, select,
+        // drag, the live-card chrome bar, double-click to edit, click to go live — comes
+        // through here, so one test covers all of them and the pointer falls through to
+        // whatever is behind, exactly as if the object were not there.
+        //
+        // `includeLocked` is for the one caller that has to see them anyway: the context
+        // menu is the only way back to a locked object, so it asks the question the other
+        // way round.
+        _hitTest(wx, wy, { includeLocked = false } = {}) {
             const tolerance = 6 / this.view.zoom;
             for (let i = this.objects.length - 1; i >= 0; i--) {
-                if (this.Objects.hitTest(this.objects[i], wx, wy, tolerance)) return this.objects[i];
+                const obj = this.objects[i];
+                if (obj.locked && !includeLocked) continue;
+                if (this.Objects.hitTest(obj, wx, wy, tolerance)) return obj;
             }
             return null;
         }
@@ -1165,7 +1547,15 @@
 
         select(ids, additive = false) {
             if (!additive) this.selection.clear();
-            for (const id of ids) this.selection.add(id);
+            for (const id of ids) {
+                // The backstop for locking. Select-all, a marquee, Tab, a paste and the
+                // context menu all arrive here, and a locked object must not end up in the
+                // set through any of them — an id in the selection is what puts a transform
+                // frame with live handles around a thing that is not supposed to move.
+                const obj = this._byId(id);
+                if (obj && obj.locked) continue;
+                this.selection.add(id);
+            }
             this.invalidateOverlay();
         }
 
@@ -1180,7 +1570,11 @@
 
         cycleSelection(direction) {
             if (!this.objects.length) return;
-            const ids = this.objects.map(o => o.id);
+            // Filtered rather than left to select(): Tab landing on a locked object would
+            // select nothing and scroll the board to it, which reads as the key being
+            // broken every third press.
+            const ids = this.objects.filter(o => !o.locked).map(o => o.id);
+            if (!ids.length) return;
             const current = [...this.selection][0];
             let index = ids.indexOf(current);
             index = index === -1
@@ -1449,31 +1843,53 @@
                 return;
             }
 
+            // The floating bar's controls, checked before anything else a click on a card
+            // can mean — including, for a web tile, the plain click that would otherwise
+            // load it, and for a live card the click that would hand the pointer to the
+            // site.
+            //
+            // Gated on the bar actually being on screen for *this* card, not merely on the
+            // pointer being inside a rectangle where one could be. The two come apart: the
+            // click that dismisses an open text editor is handled above, and hover is
+            // suppressed while the editor is up — so without this, clicking away from a
+            // caption that happens to sit over a capture's bottom corner would launch the
+            // website underneath it, from a control nobody could see.
+            //
+            // The pause control matters most for a web tile: nothing else can stop one. It
+            // has no screenshot to fall back to, and it used to be stopped only by scrolling
+            // it off the board or backgrounding the tab — neither of which does anything now.
+            let chromePart = null;
+            if (!e.shiftKey && !e.ctrlKey && this._chromeShown === hit.id) {
+                chromePart = this._hitChrome(hit, world);
+                if (chromePart === "play") {
+                    this.select([hit.id]);
+                    this._toggleLive(hit);
+                    return;
+                }
+                if (chromePart === "link") {
+                    this.select([hit.id]);
+                    this.host.capture.openWebcard(hit);
+                    return;
+                }
+            }
+
             // Clicking a live card hands the pointer straight to the page inside it —
             // one click, because anything more makes the card feel dead. Shift and Ctrl
             // are excluded so multi-select and duplicate still reach the board.
             //
-            // The card's footer strip is deliberately not covered by the tile, so
-            // dragging a live card by its title bar still moves it, and Escape hands the
-            // pointer back.
-            // The play/pause control, checked before anything else that a click on a card
-            // can mean — including, for a web tile, the plain click that would otherwise
-            // load it. It sits in a canvas-drawn strip precisely so it stays reachable once
-            // the tile covers the rest; without it, stopping a card means finding the
-            // context menu.
+            // Everywhere except the bar. This used to be unconditional, and it is why a
+            // live card could not be dragged at all: the press activated the tile and
+            // returned, so it never reached the move drag at the end of this method, and
+            // one frame later the tile had the pointer and the gesture was the website's.
+            // The comment here claimed dragging still worked because a tile takes no
+            // pointer events until it is activated — true of the tile, and beside the
+            // point, since this line activated it on the way past.
             //
-            // Both types, and for a web tile that is not optional: nothing else can stop
-            // one. It has no screenshot to fall back to, so it was never given a badge, and
-            // it used to be stopped only by scrolling it off or backgrounding the tab —
-            // neither of which does anything now.
-            if ((hit.type === "webcard" || hit.type === "webBrowser") &&
-                !e.shiftKey && !e.ctrlKey && this._hitLiveBadge(hit, world)) {
-                this.select([hit.id]);
-                this._toggleLive(hit);
-                return;
-            }
-
-            if (this.host.live && this.host.live.isLive(hit.id) && !e.shiftKey && !e.ctrlKey) {
+            // So the bar is the handle, and this is the whole of what makes it one: a
+            // press on it declines to activate and falls through to the generic drag
+            // below. Everywhere else on the card still means "let me use the site".
+            if (this.host.live && this.host.live.isLive(hit.id) &&
+                !e.shiftKey && !e.ctrlKey && chromePart !== "bar") {
                 this.select([hit.id]);
                 this.host.live.activate(hit.id);
                 return;
@@ -1482,7 +1898,11 @@
             // A webBrowser object has no screenshot to fall back on, so a plain click is
             // what loads it — there is nothing to opt in to that clicking does not already
             // say. The card that is drawn until then tells you so.
-            if (hit.type === "webBrowser" && !e.shiftKey && !e.ctrlKey &&
+            //
+            // The bar is exempt here too, and for the same reason it is above: an unloaded
+            // web tile wears one, and grabbing it to move the card must not be the click
+            // that loads a website.
+            if (hit.type === "webBrowser" && !e.shiftKey && !e.ctrlKey && chromePart !== "bar" &&
                 this.host.live && this.host.live.canGoLive(hit)) {
                 this.select([hit.id]);
                 // Loaded, but deliberately not activated. Activating on load would hand the
@@ -1516,6 +1936,10 @@
             this._startDrag({
                 mode: "move",
                 world,
+                // Whether the bar is the thing being held. Read by _hoverActive, which
+                // keeps the bar on screen for the length of a drag it started rather than
+                // hiding it the way it hides for every other gesture.
+                fromChrome: chromePart === "bar",
                 originals: ids.map(id => deepCopy(this._byId(id))).filter(Boolean)
             }, e);
         }
@@ -1524,6 +1948,9 @@
             const obj = this.Objects.createObject("shape", {
                 x: world.x, y: world.y, w: 0, h: 0,
                 color: this.host.tools.color,
+                // Follows the toolbar the way colour and stroke width do, so a run of
+                // faded shapes does not mean setting each one after drawing it.
+                opacity: this.host.tools.opacity,
                 // filled follows the toolbar's remembered choice, so drawing a run of solid
                 // shapes does not mean setting each one afterwards. Lines and arrows ignore
                 // it — the renderer never reaches the fill for them.
@@ -1551,6 +1978,7 @@
         _penDown(e, world) {
             const obj = this.Objects.createObject("ink", {
                 color: this.host.tools.color,
+                opacity: this.host.tools.opacity,
                 ink: {
                     points: [[world.x, world.y, e.pressure > 0 ? e.pressure : 0.5]],
                     strokeWidth: this.host.tools.strokeWidth,
@@ -1586,7 +2014,13 @@
 
         _onPointerMove(e) {
             const drag = this._drag;
-            if (!drag || e.pointerId !== drag.pointerId) return;
+            if (!drag || e.pointerId !== drag.pointerId) {
+                // No gesture in flight, so this is a hover. A non-activated live tile is
+                // pointer-events:none, so a move over a running website arrives here too —
+                // which is what lets one hover path serve a static card and a live one.
+                this._updateHover(e);
+                return;
+            }
             drag.moved = true;
 
             // Ink consumes every sample the device produced between frames, not just
@@ -1657,6 +2091,9 @@
 
             this.selection = new Set(drag.additive ? drag.base : []);
             for (const obj of this.objects) {
+                // Rebuilt from scratch on every pointermove, so it writes the set directly
+                // rather than through select(); the lock test has to be repeated here.
+                if (obj.locked) continue;
                 if (this.Objects.intersects(this.Objects.bounds(obj), box)) this.selection.add(obj.id);
             }
             this._paint();
@@ -1885,6 +2322,11 @@
             obj.h = maxY - minY;
         }
 
+        _onPointerLeave() {
+            this._hoverScreen = null;
+            this.clearHover();
+        }
+
         _onPointerUp(e) {
             const drag = this._drag;
             if (!drag || e.pointerId !== drag.pointerId) return;
@@ -1947,6 +2389,19 @@
                     break;
                 }
             }
+
+            // Hover was suppressed for the length of the gesture, and the pointer has not
+            // moved since it ended — so nothing else is coming to say what it is resting on
+            // now. Usually that is the card it was just dragging, whose bar should come
+            // back the moment the button is released.
+            //
+            // Through _updateHover rather than _applyHoverAt, so the *position* is recorded
+            // too. _updateHover is skipped for the length of a drag, so without this
+            // _hoverScreen still holds wherever the pointer was before the press — and the
+            // next refreshHover (a tool shortcut, Escape out of a tile) would re-derive
+            // hover at a point the pointer left three hundred pixels ago, lighting up
+            // whatever card happens to be sitting there now.
+            this._updateHover(e);
         }
 
         // Objects drawn by dragging are pushed straight into the array so they render
@@ -2008,9 +2463,20 @@
         _onContextMenu(e) {
             if (!this.doc) return;
             e.preventDefault();
+            // The menu is drawn inside the easel's document, and the bar is drawn above it
+            // in the browser window — so a bar left up would float over the menu that is
+            // about to open on top of the card.
+            this.clearHover();
             const world = this._worldPoint(e);
-            const hit = this._hitTest(world.x, world.y);
-            if (hit && !this.selection.has(hit.id)) this.select([hit.id]);
+            // The one place locked objects are visible to the pointer. Right-click is the
+            // only way back to one, so a menu that could not see them would leave a locked
+            // object with no route to being unlocked.
+            const hit = this._hitTest(world.x, world.y, { includeLocked: true });
+            // ...and it still does not select one. The menu is handed the object it was
+            // opened on, and acts on that rather than on the selection when it is locked —
+            // see showContextMenu's `targets`.
+            if (hit && hit.locked) this.clearSelection();
+            else if (hit && !this.selection.has(hit.id)) this.select([hit.id]);
             else if (!hit) this.clearSelection();
             this.host.tools.showContextMenu(this._screenPoint(e), hit, world);
         }
@@ -2060,6 +2526,7 @@
                 y: Math.round(centre.y),
                 w: width,
                 color: tools.color,
+                opacity: tools.opacity,
                 text: {
                     content: "Textbox",
                     fontSize: tools.fontSize,
@@ -2075,7 +2542,11 @@
 
         startEditing(id, options) {
             const obj = this._byId(id);
-            if (!obj || obj.type !== "text") return;
+            // Refused outright for a locked box rather than left to the double-click that
+            // can no longer reach one: select() declines a locked id, so an editor opened
+            // by any other route would be sitting on an object that is not selected, with
+            // an open mutation behind it.
+            if (!obj || obj.type !== "text" || obj.locked) return;
             // Committing through stopEditing rather than letting the editor replace
             // itself, so the open mutation and _hiddenId are cleaned up too.
             if (this.host.textEditor.isEditing) this.stopEditing();
@@ -2290,9 +2761,16 @@
 
         // `system: false` for Ctrl+D, which copies only so that it can immediately paste
         // and has no business touching what the user has on their clipboard.
-        copySelection({ system = true } = {}) {
-            if (!this.selection.size) return;
-            const objects = this._selected();
+        copySelection(options) { return this.copyObjects([...this.selection], options); }
+
+        // The id-taking form, and the reason there is one: a locked object is never
+        // selected, so on the context menu "what you right-clicked" and "what is selected"
+        // are two different lists. Returns how many objects it actually took, so a caller
+        // that is about to paste them can tell an empty copy from a full one rather than
+        // pasting whatever happened to be on the clipboard already.
+        copyObjects(ids, { system = true } = {}) {
+            const objects = ids.map(id => this._byId(id)).filter(Boolean);
+            if (!objects.length) return 0;
             this._clipboard = objects.map(deepCopy);
 
             // Copying in the easel now writes to the system clipboard too, and that is what
@@ -2318,6 +2796,7 @@
                 const token = this._clipboardTokenFor(objects);
                 this._clipboardToken = this._writeSystemText(token) ? token : null;
             }
+            return objects.length;
         }
 
         // What copying these objects puts on the system clipboard. Their text if they have
@@ -2491,6 +2970,11 @@
                 const copy = { ...deepCopy(obj), id: this.Objects.uuid() };
                 copy.x += dx;
                 copy.y += dy;
+                // The copy arrives unlocked even when the original was not. A paste lands
+                // selected and is expected to be moved into place; there is no layers panel
+                // here, so a locked one would be a copy you have to hunt for and unlock
+                // before you could do the thing you pasted it to do.
+                copy.locked = false;
                 // Ink points are absolute, so they travel with the object rather than
                 // being relative to its box.
                 if (copy.type === "ink") {
@@ -2505,19 +2989,26 @@
             this._clipboard = copies.map(deepCopy);
         }
 
-        duplicateSelection() {
-            if (!this.selection.size) return;
+        duplicateSelection() { return this.duplicateObjects([...this.selection]); }
+
+        duplicateObjects(ids) {
             // Ctrl+D is a copy only in the sense that it needs something to paste. It must
             // not overwrite what the user has on their clipboard.
-            this.copySelection({ system: false });
+            //
+            // Guarded on what was actually copied rather than on the ids: a list that
+            // resolves to nothing would otherwise leave the clipboard as it was and paste
+            // that instead, which is a duplicate of the wrong thing.
+            if (!this.copyObjects(ids, { system: false })) return;
             this.paste();
         }
 
-        reorderSelection(direction) {
-            if (!this.selection.size) return;
-            const ids = [...this.selection];
-            const moving = this.objects.filter(o => ids.includes(o.id));
-            const rest = this.objects.filter(o => !ids.includes(o.id));
+        reorderSelection(direction) { return this.reorderObjects([...this.selection], direction); }
+
+        reorderObjects(ids, direction) {
+            const set = new Set(ids);
+            const moving = this.objects.filter(o => set.has(o.id));
+            if (!moving.length) return;
+            const rest = this.objects.filter(o => !set.has(o.id));
             const before = this.objects.slice();
             this.doc.objects = direction > 0 ? [...rest, ...moving] : [...moving, ...rest];
             const after = this.objects.slice();
@@ -2526,6 +3017,35 @@
                 redo: () => { this.doc.objects = after.slice(); }
             });
             this._touch();
+            this.invalidate();
+        }
+
+        // Pinning objects to the board. Takes ids rather than reading the selection,
+        // because unlocking is by definition done to something that is not selected.
+        //
+        // Locking also drops the object out of the selection and hands back an activated
+        // live card. Both are the same point: an id left in the selection keeps a transform
+        // frame with working handles around a thing that is not supposed to move, and an
+        // activated tile has literally taken the pointer, so the site inside a locked card
+        // would go on answering clicks that the board around it no longer does.
+        setLocked(ids, locked) {
+            const list = [...new Set(ids)].filter(id => this._byId(id));
+            if (!list.length) return;
+
+            this.beginMutation(list);
+            for (const id of list) this._byId(id).locked = !!locked;
+            this.commitMutation();
+
+            if (locked) {
+                for (const id of list) this.selection.delete(id);
+                const live = this.host.live;
+                if (live && live.activeId && list.includes(live.activeId)) live.deactivate();
+                // The pointer has not moved, so nothing else would drop the halo and the
+                // card bar that are still showing for the object under it.
+                this.clearHover();
+            }
+
+            this.invalidateOverlay();
             this.invalidate();
         }
 
@@ -2571,6 +3091,54 @@
             if (!changed) return;
             this.renderer.invalidateInkCache();
             this.invalidate();
+        }
+
+        // Opacity applies to every type, so unlike the stroke width there is nothing to
+        // filter out — a selection of a capture, a caption and a pen stroke all fade
+        // together.
+        //
+        // The one thing that makes this different from its siblings is that it arrives as
+        // a stream: a slider drag fires a value per pixel, and one undo entry per pixel
+        // would bury whatever came before it. `live` holds a single mutation open across
+        // the gesture and the final, non-live call closes it, so the whole drag lands on
+        // the undo stack as one step.
+        setSelectionOpacity(opacity, live = false) {
+            // A drag that began on a selection which has since gone still has to be closed
+            // out, or the next mutation would commit against a stale snapshot.
+            if (!this.selection.size) {
+                this.endOpacityDrag();
+                return;
+            }
+
+            const ids = [...this.selection];
+            if (!this._opacityLive) this.beginMutation(ids);
+            this._opacityLive = live;
+
+            // Clamped here rather than trusted from the caller. The slider already bounds
+            // itself to OPACITY.min/max, but this is the public entry point and the load-time
+            // validator clamps the same way — one definition, so a value that reaches an
+            // object can never be one sanitizeObject would refuse to read back.
+            const value = this.Objects.clampOpacity(opacity);
+            for (const id of ids) {
+                const obj = this._byId(id);
+                if (obj) obj.opacity = value;
+            }
+
+            // Ink bitmaps are not keyed on opacity — the renderer applies it to the blit —
+            // so nothing needs invalidating here.
+            if (live) this._touch();
+            else this.commitMutation();
+            this.invalidate();
+        }
+
+        // Ends an opacity drag that was interrupted rather than released — the popup
+        // closing under it, the board being switched. Without this the mutation opened by
+        // the first slider event stays open and the next unrelated edit commits against
+        // its snapshot, so undo would roll back both.
+        endOpacityDrag() {
+            if (!this._opacityLive) return;
+            this._opacityLive = false;
+            this.commitMutation();
         }
 
         // The shape equivalent of setSelectionText: patches obj.shape on every selected

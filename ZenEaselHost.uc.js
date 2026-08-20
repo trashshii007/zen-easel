@@ -438,12 +438,23 @@
             const spec = safeExternalUrl(url);
             if (!spec) return;
             try {
-                gBrowser.selectedTab = gBrowser.addTab(spec, {
-                    // Deliberately not the system principal. A system triggering principal
-                    // is what would let javascript:, data:, file: and chrome: load with
-                    // privilege from a string that originates in a file on disk.
-                    triggeringPrincipal: Services.scriptSecurityManager.createNullPrincipal({}),
-                    inBackground: false
+                // openWebLinkIn rather than addTab + selectedTab, which is what this used
+                // to be. Selecting a tab and *focusing* it are two different things, and
+                // hand-rolling the first only looked sufficient because outside a split
+                // view the two coincide: the deck swaps and focus follows the one visible
+                // browser. In a split, focus is held by a particular pane's <browser> and
+                // stays there — the tab was created and selected, and the caret and the
+                // keyboard were still in the easel. openLinkIn ends by focusing the browser
+                // it loaded into, which is the step that was missing.
+                //
+                // It also resolves the target window and honours forceForeground, and it
+                // defaults the triggering principal to exactly the null principal built
+                // here before — deliberately not the system principal, which is what would
+                // let javascript:, data:, file: and chrome: load with privilege from a
+                // string that originates in a file on disk. Passed explicitly so that
+                // intent stays legible; openWebLinkIn throws on a system principal anyway.
+                openWebLinkIn(spec, "tab", {
+                    triggeringPrincipal: Services.scriptSecurityManager.createNullPrincipal({})
                 });
             } catch (e) {
                 console.error("[zen-easel] could not open", spec, e);
@@ -486,11 +497,21 @@
         liveSetBoardPainting(easelId, painting) { this.live?.setBoardPainting(easelId, painting); }
 
         liveLayout(easelId, entries) { this.live?.layoutAll(easelId, entries); }
+        // The page's own toolbar, topbar and panels, as rectangles to be cut out of this
+        // board's tile layer — the layer sits above the page's whole content area, so
+        // without this a live card simply covers them. See live-host's clipChrome.
+        liveClipChrome(easelId, rects) { return this.live?.clipChrome(easelId, rects) ?? false; }
+        // A running web tile's own pixels, so a card that is not running has something to
+        // show besides its URL. Resolves to { bytes } or null. See live-host's
+        // snapshotTile.
+        liveSnapshotTile(easelId, objectId) {
+            return this.live ? this.live.snapshotTile(easelId, objectId) : Promise.resolve(null);
+        }
         liveUnmount(easelId, objectId) { this.live?.unmountFor(easelId, objectId); }
         liveUnmountBoard(easelId) { this.live?.unmountBoard(easelId); }
         liveActivate(easelId, objectId) { this.live?.activate(easelId, objectId); }
         liveDeactivate() { this.live?.deactivate(); }
-        liveCount(easelId) { return this.live?.count(easelId) ?? { total: 0, board: 0 }; }
+        liveCount() { return this.live?.count() ?? { total: 0 }; }
         liveList(easelId) { return this.live?.list(easelId) ?? []; }
         liveStopAll() { this.live?.stopAll(); }
         // Two separate reasons a tile stops painting, kept apart across the seam because the
@@ -498,6 +519,12 @@
         liveSetTileOffscreen(easelId, objectId, off) { this.live?.setTileOffscreen(easelId, objectId, off); }
         liveSetTileHidden(easelId, objectId, hidden) { this.live?.setTileHidden(easelId, objectId, hidden); }
         liveSetTileMuted(easelId, objectId, muted) { this.live?.setTileMuted(easelId, objectId, muted); }
+
+        // The floating card bar. Drawn on this side because a live tile is a <browser> above
+        // the easel's document and would bury anything the page painted; hit-tested on the
+        // page's side, against the same geometry it lays the bar out from. `spec` is null to
+        // take it down. At most one exists per window — one pointer, one hover.
+        liveShowChrome(easelId, spec) { this.live?.showChrome(easelId, spec); }
 
         // Saves an exported board. The page renders the pixels and the window writes the
         // file: a file picker is chrome UI, and keeping the one filesystem write on this

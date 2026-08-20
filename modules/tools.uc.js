@@ -57,6 +57,10 @@
             this.active = "pointer";
             this.color = "black";
             this.strokeWidth = 8;
+            // Fully opaque, like every object created before there was a slider. Kept as
+            // a toolbar default alongside colour and stroke width, so the next thing drawn
+            // inherits whatever the last thing was set to.
+            this.opacity = 1;
             // Whether a newly drawn shape is a solid block or an outline. Set from the
             // floating shape controls, the way fontSize is set from the text ones.
             this.shapeFilled = false;
@@ -135,7 +139,70 @@
                 }, [this.el("span", { style: { width: `${width + 6}px`, height: `${width + 6}px` } })]));
             }
 
-            this._showPopup(this._colorButton, [swatches, widths]);
+            this._showPopup(this._colorButton, [swatches, widths, this._opacityRow()]);
+        }
+
+        // The third row of the style popup. A slider rather than a set of preset stops,
+        // because unlike colour and stroke width opacity has no natural vocabulary — the
+        // value you want is "a bit fainter than that", which is a drag, not a choice from
+        // a list.
+        //
+        // Unlike a swatch it does not close the popup: you are aiming at a result on the
+        // board, and a control that dismisses itself on first contact could not be aimed.
+        _opacityRow() {
+            const OPACITY = window.ZenEaselObjects.OPACITY;
+
+            // Whatever is selected wins over the toolbar's remembered default: the slider
+            // is about to *change* those objects, so it has to start where they are or the
+            // first touch would jump them to a value nobody asked for. A mixed selection
+            // has no single answer, so it falls back to the default rather than picking
+            // one object's value to speak for the rest.
+            const current = this._selectionOpacity() ?? this.opacity;
+
+            const readout = this.el("span", {
+                className: "easel-opacity-value",
+                textContent: `${Math.round(current * 100)}%`
+            });
+
+            const slider = this.el("input", {
+                className: "easel-opacity-slider",
+                type: "range",
+                min: String(Math.round(OPACITY.min * 100)),
+                max: String(Math.round(OPACITY.max * 100)),
+                step: String(Math.round(OPACITY.step * 100)),
+                value: String(Math.round(current * 100)),
+                title: "Opacity",
+                "aria-label": "Opacity",
+                // input fires continuously, change once the drag ends (and once per press
+                // for the keyboard). So the board follows the thumb, and the undo stack
+                // gets one entry for the whole gesture.
+                oninput: e => {
+                    readout.textContent = `${e.target.value}%`;
+                    this.setOpacity(Number(e.target.value) / 100, true);
+                },
+                onchange: e => this.setOpacity(Number(e.target.value) / 100, false)
+            });
+
+            return this.el("div", { className: "easel-popup-opacity" }, [
+                this.el("span", { className: "easel-opacity-label", textContent: "Opacity" }),
+                slider,
+                readout
+            ]);
+        }
+
+        // The selection's opacity, or null when it is empty or disagrees with itself.
+        _selectionOpacity() {
+            const canvas = this.host.canvas;
+            if (!canvas || !canvas.selection.size) return null;
+            let value = null;
+            for (const id of canvas.selection) {
+                const obj = canvas._byId(id);
+                if (!obj) continue;
+                const opacity = obj.opacity === undefined ? 1 : obj.opacity;
+                if (value === null) value = opacity;
+                else if (value !== opacity) return null;
+            }
+            return value;
         }
 
         // Icons are authored as SVG markup so they stay readable; parsing beats forty
@@ -203,10 +270,17 @@
                 // user actually gave.
                 webBrowser: { url, title: entered.replace(/^https?:\/\//, "") }
             });
-            // A video is 16:9. Anything else gets the default card, which is close
-            // enough to a page's shape to be a reasonable starting point.
+            // A video is 16:9, and nothing more. It used to carry another 28 units for the
+            // URL strip the renderer drew across a web tile's top, back when the tile was
+            // inset below it; that strip is a floating bar now and the tile is the whole
+            // object, so the same arithmetic leaves the player letterboxed. Kept in step
+            // with capture-page's _addVideoTile, which is the dropped-link path to the
+            // same object.
+            //
+            // Anything else gets the default card, which is close enough to a page's shape
+            // to be a reasonable starting point.
             obj.w = size.w;
-            obj.h = embed ? Math.round(size.w * 9 / 16) + 28 : size.h;
+            obj.h = embed ? Math.round(size.w * 9 / 16) : size.h;
             this.host.canvas.addObjects([obj]);
         }
 
@@ -228,16 +302,29 @@
             for (const [id, button] of this._buttons) {
                 button.classList.toggle("is-active", id === this.active);
             }
-            if (this._colorButton) {
-                const dot = this._colorButton.firstElementChild;
-                dot.style.background = window.ZenEaselObjects.colorCss(this.color);
-                // The stroke width is shown as the size of the dot, so the one button
-                // reports both things it controls.
-                const size = 10 + this.strokeWidth;
-                dot.style.width = `${size}px`;
-                dot.style.height = `${size}px`;
-            }
+            this._syncColorDot();
             this.host.viewport.dataset.tool = this.active;
+            // A tool is picked from a keystroke as often as from the button, and neither
+            // moves the pointer — so nothing else would tell the canvas that what it is
+            // resting on has stopped being something you can pick. Without this, arming the
+            // rectangle tool over a web card leaves the hover halo and the floating bar
+            // sitting on it, with buttons that no longer answer because a press now goes to
+            // the tool. Re-derived rather than cleared, so going back to select restores
+            // them just as readily.
+            this.host.canvas?.refreshHover();
+        }
+
+        // The dot is a preview of the next mark, so it wears all three of the things the
+        // button controls: the colour it will be, the width it will be drawn at, and how
+        // far through it you will see.
+        _syncColorDot() {
+            if (!this._colorButton) return;
+            const dot = this._colorButton.firstElementChild;
+            dot.style.background = window.ZenEaselObjects.colorCss(this.color);
+            const size = 10 + this.strokeWidth;
+            dot.style.width = `${size}px`;
+            dot.style.height = `${size}px`;
+            dot.style.opacity = this.opacity < 1 ? String(this.opacity) : "";
         }
 
         /* -------------------------------------------------------------- popups */
@@ -255,14 +342,21 @@
 
             this._popup = { element: popup, anchor };
             anchor.classList.add("is-open");
+            this.host.chromeChanged();
             this.host.shadowRoot.addEventListener("pointerdown", this._onDocPointerDown, true);
         }
 
         closePopup() {
             if (!this._popup) return;
+            // The slider's `change` never arrives if the popup goes away under a drag
+            // (Escape, a tool shortcut, switching easel), which would leave the canvas
+            // holding an open mutation. This is the one place every route out passes
+            // through, and it is a no-op unless a drag really was in flight.
+            this.host.canvas?.endOpacityDrag();
             this._popup.element.remove();
             this._popup.anchor.classList.remove("is-open");
             this._popup = null;
+            this.host.chromeChanged();
             if (!this._menu) {
                 this.host.shadowRoot.removeEventListener("pointerdown", this._onDocPointerDown, true);
             }
@@ -311,6 +405,20 @@
             this.host.viewport.focus({ preventScroll: true });
         }
 
+        // The slider's counterpart to setColor. Two differences, both from it being a
+        // drag rather than a click: focus is left where it is (pulling it back to the
+        // board mid-drag would end the gesture the pointer is still making), and `live`
+        // is passed straight through so the canvas can keep one undo entry open.
+        setOpacity(opacity, live = false) {
+            this.opacity = window.ZenEaselObjects.clampOpacity(opacity);
+            this.host.canvas.setSelectionOpacity(this.opacity, live);
+            // Only the dot is repainted while the thumb is moving. A full _syncActive
+            // rewrites nine buttons' active classes and the viewport's tool dataset, none
+            // of which depend on the opacity, and this runs on every pointermove.
+            this._syncColorDot();
+            if (!live) this.host.viewport.focus({ preventScroll: true });
+        }
+
         setStrokeWidth(width) {
             this.strokeWidth = width;
             this.host.canvas.setSelectionStroke(width);
@@ -347,6 +455,14 @@
 
             const canvas = this.host.canvas;
             const items = [];
+
+            // What the object items below act on. Normally the selection, because
+            // right-clicking an unselected object selects it first — but a locked object is
+            // never selected, so for one of those the menu speaks for the object it was
+            // opened on and nothing else. Right-click is the only way to reach a locked
+            // object at all, so this is the list every item there has to use.
+            const locked = !!(hit && hit.locked);
+            const targets = locked ? [hit.id] : [...canvas.selection];
 
             // A swatch strip for the board background, on empty canvas only. Object
             // colours used to have a strip here too; they have moved back to the
@@ -394,7 +510,7 @@
                 // The same pair for a web tile. It has no screenshot to go back to, so the
                 // wording is about the site rather than the picture — and unlike a webcard
                 // this is not a convenience: a running web tile can only be stopped from
-                // here or from its badge.
+                // here or from the floating bar's pause control.
                 if (hit.type === "webBrowser" && hit.webBrowser.url) {
                     const live = this.host.live;
                     if (live && live.isLive(hit.id)) {
@@ -427,15 +543,24 @@
                     });
                     items.push({ separator: true });
                 }
-                items.push({ label: "Duplicate", hint: "Ctrl+D", action: () => canvas.duplicateSelection() });
-                items.push({ label: "Copy", hint: "Ctrl+C", action: () => canvas.copySelection() });
+                items.push({ label: "Duplicate", hint: "Ctrl+D", action: () => canvas.duplicateObjects(targets) });
+                items.push({ label: "Copy", hint: "Ctrl+C", action: () => canvas.copyObjects(targets) });
                 items.push({ separator: true });
-                items.push({ label: "Bring to front", hint: "Ctrl+]", action: () => canvas.reorderSelection(1) });
-                items.push({ label: "Send to back", hint: "Ctrl+[", action: () => canvas.reorderSelection(-1) });
+                items.push({ label: "Bring to front", hint: "Ctrl+]", action: () => canvas.reorderObjects(targets, 1) });
+                items.push({ label: "Send to back", hint: "Ctrl+[", action: () => canvas.reorderObjects(targets, -1) });
+                items.push({ separator: true });
+                // No shortcut hint, and deliberately no keystroke behind it. A key that
+                // locks would be a key that makes the thing you just pressed it on stop
+                // answering the pointer, with nothing on screen to say why; the menu is
+                // where you find locking and the menu is where you undo it.
+                items.push({
+                    label: locked ? "Unlock" : "Lock",
+                    action: () => canvas.setLocked(targets, !locked)
+                });
                 items.push({ separator: true });
                 items.push({
                     label: "Delete", danger: true, hint: "Del",
-                    action: () => canvas.removeObjects([...canvas.selection])
+                    action: () => canvas.removeObjects(targets)
                 });
             } else {
                 items.push({
@@ -465,7 +590,7 @@
                     });
                 }
                 items.push({ separator: true });
-                // Arc's CanvasMode, per board. Off by default — see the note in
+                // Arc's CanvasMode, per board. On by default — see the note in
                 // canvas.uc.js. Named for what it does rather than for the mechanism:
                 // "Reflow with the window" described the implementation and left the
                 // choice unreadable, which is most of why the mode went unused.

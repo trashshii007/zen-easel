@@ -67,6 +67,27 @@ export function safeExternalUrl(raw) {
     return uri.spec;
 }
 
+// A card's favicon, or "". Local schemes only.
+//
+// The icon is loaded as a plain <img> — by the floating card bar, which is chrome DOM in
+// the browser window, and by the library's thumbnails in the page. A remote URL there is
+// the easel reaching out to somebody's server every time a card comes under the pointer,
+// from a string that lives in a hand-editable file on disk.
+//
+// data:image/ rather than data: whole: the broader form is what screenshot-hook accepts
+// straight from gBrowser.getIcon, and by the time a value reaches here it has been
+// through a document on disk, so the tighter test is the one that belongs on the way in.
+//
+// Here, and not beside its callers, for the reason at the top of this file: the page's
+// object sanitizer and the live-tile host both apply it, in different globals, and two
+// copies of a gate are how the gate stops meaning anything.
+const LOCAL_ICON_RE = /^(page-icon:|data:image\/|chrome:|moz-)/i;
+
+export function safeFaviconUrl(value) {
+    const url = String(value || "").trim();
+    return LOCAL_ICON_RE.test(url) ? url : "";
+}
+
 // Coerces a caller-supplied extension hint (a MIME subtype or a filename suffix) to one
 // the store will keep.
 export function safeExtension(extension) {

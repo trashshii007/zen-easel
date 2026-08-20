@@ -242,15 +242,18 @@
             return obj;
         }
 
-        // A webBrowser object sized to 16:9 plus the URL strip the renderer draws above
-        // it. Clicking it loads the player through the ordinary live-tile path, which is
+        // A webBrowser object sized to 16:9, and to nothing more. It used to carry another
+        // 28 units for the URL strip the renderer drew across the top, back when the tile
+        // was inset below it; that strip is a floating bar now and the tile is the whole
+        // object, so the same arithmetic leaves the player letterboxed by 28 units of dead
+        // panel. Clicking it loads the player through the ordinary live-tile path, which is
         // the only way web content can run here at all — see live-host.uc.js.
         _addVideoTile(url, title, at) {
             const width = window.ZenEaselObjects.DEFAULT_SIZE.webBrowser.w;
             const obj = window.ZenEaselObjects.createObject("webBrowser", {
                 x: Math.round(at.x), y: Math.round(at.y),
                 w: width,
-                h: Math.round(width * 9 / 16) + 28,
+                h: Math.round(width * 9 / 16),
                 webBrowser: { url, title }
             });
             this.host.canvas.addObjects([obj], { select: false });
@@ -515,8 +518,15 @@
         // Opening a page is the browser window's job. The scheme check runs on both sides
         // of the bridge: here because the object may have been mutated in memory since it
         // was loaded, and there because the host must not trust a caller.
+        //
+        // Both web types, because both now carry an open-link button in their floating bar
+        // and a web tile's URL is as much a source page as a capture's is.
         openWebcard(obj) {
-            const url = window.ZenEaselObjects.safeExternalUrl(obj.webcard && obj.webcard.url);
+            if (!obj) return;
+            const raw = obj.type === "webBrowser"
+                ? obj.webBrowser && obj.webBrowser.url
+                : obj.webcard && obj.webcard.url;
+            const url = window.ZenEaselObjects.safeExternalUrl(raw);
             if (!url) return;
             const bridge = this.host.bridge;
             if (bridge) bridge.openUrl(url);

@@ -120,11 +120,12 @@ the view; `I` opens the file picker straight away, and the image lands centred. 
 was nothing to aim in the second click — the picker is a dialog, and the file arrived in
 the middle of the view either way.
 
-The toolbar sits at the **bottom left**, as Arc's does. Colour and stroke width share
-one button at its right-hand end: the dot shows the current colour, and its size shows
-the current stroke width. Number keys `1`–`9` and `0` pick the first ten palette colours
-directly; the eleventh is in the swatch popup. All of these apply to the selection as
-well as setting the default — see **Palettes**.
+The toolbar sits at the **bottom left**, as Arc's does. Colour, stroke width and opacity
+share one button at its right-hand end: the dot shows the current colour, its size shows
+the current stroke width, and how far through it you can see is the current opacity.
+Number keys `1`–`9` and `0` pick the first ten palette colours directly; the eleventh is
+in the swatch popup. All of these apply to the selection as well as setting the default —
+see **Palettes** and **Opacity**.
 
 ### Palettes
 
@@ -160,6 +161,88 @@ and click it.
 
 The pen stays armed after a stroke so you can keep sketching; every other tool drops
 back to select.
+
+### Locking
+
+**Lock**, on an object's right-click menu, pins it to the board. It is implemented as one
+test in one place: `_hitTest` skips locked objects. Everything that treats a click as
+landing on something goes through that function — the hover halo, the live card's floating
+bar, selection, dragging, double-click to edit, the click that loads a web tile — so the
+pointer falls through a locked object to whatever is behind it, exactly as if it were not
+there. There is no separate list of things locking disables, and so no way for a new
+pointer feature to quietly not be covered by it.
+
+Selection is the second gate, and it is what makes the keyboard follow. `select()` declines
+a locked id outright, so `Ctrl`+`A`, a marquee and `Tab` step over one, and every keyboard
+edit — nudging, `Delete`, `Ctrl`+`D`/`C`/`X`, the reordering pair, colour, stroke width and
+opacity — is out of reach for free, because all of them act on the selection. Locking an
+object that is already selected drops it out of the set: an id left in there keeps a
+transform frame with working handles around a thing that is not supposed to move.
+
+**Right-click is the way back**, and the only one. It asks `_hitTest` the question the
+other way round, with `includeLocked`, because a menu that could not see a locked object
+would leave it with no route to being unlocked. It still does not *select* it — so while
+the target is locked, the menu's object items act on the object you clicked rather than on
+the selection. That is why `duplicateObjects`, `copyObjects` and `reorderObjects` exist
+beside their `…Selection` siblings; the selection cannot speak for something that is never
+in it.
+
+Two consequences worth stating:
+
+- **A locked live card or web tile will not take the pointer.** It cannot be clicked to go
+  live, and locking one that is already activated hands the pointer back — otherwise the
+  site inside a locked card would go on answering clicks that the board around it no longer
+  does. If you would rather lock a tile *so that* you can use the site inside it without
+  dragging the card by accident, that is the one line to change: drop the `deactivate()` in
+  `setLocked` and let `_pointerToolDown` see locked live cards.
+- **A copy comes back unlocked**, duplicated or pasted. Figma keeps the lock, but Figma has
+  a layers panel to select from; here a locked paste would be a copy you have to hunt for
+  and unlock before you could do the thing you pasted it to do.
+
+There is deliberately no keystroke for locking and no badge on a locked object. A key that
+locks is a key that makes whatever you just pressed it on stop answering the pointer with
+nothing on screen to say why, and the menu that offers **Lock** is the same menu that
+offers **Unlock**.
+
+### Opacity
+
+The third row of the style popup, under the swatches and the widths. It is a slider
+rather than a set of preset stops, because opacity has no vocabulary the way colour and
+stroke width do — the value you want is "a bit fainter than that", which is a drag, not a
+choice from a list. It runs from 100% down to 10%, and the floor is not zero on purpose:
+a fully invisible object is still on the board, still selectable and still in the way,
+and all it tells you is that something has gone wrong.
+
+Unlike a swatch it does not close the popup on first contact — you are aiming at a result
+on the board, and a control that dismissed itself could not be aimed. It opens showing the
+selection's own value rather than the toolbar default, so the first touch does not jump
+anything, and a mixed selection falls back to the default rather than picking one object's
+value to speak for the rest.
+
+**Every type fades.** Opacity lives beside `x`, `y` and `rotation` rather than inside any
+one type's sub-object, so a capture, a caption and a pen stroke all take it — shapes, ink,
+text, still images, animated GIFs, web cards and web tiles.
+
+Three of those are not painted by the canvas and so cannot be reached by the renderer's
+`globalAlpha`, and each is faded where it actually lives:
+
+| | |
+|---|---|
+| animated GIFs | an `<img>` in the media layer — the compositor fades the element |
+| a text box being edited | the `<textarea>` overlay, alongside its colour and font |
+| a running live tile | sent to the host with the tile's geometry and applied to its wrapper |
+
+That last one is why pressing **▶** on a faded card does not snap it back to full
+strength. The hover bar is chrome rather than content, so it stays legible either way.
+
+The whole drag is **one undo step**, not one per pixel: the first slider event opens a
+mutation and the release closes it. Committed pen strokes are cached as bitmaps, and the
+opacity is applied to the blit rather than baked into the bitmap and left out of the cache
+key — so dragging the slider over a board full of ink does not re-rasterise every stroke
+on every frame to produce pixels that differ by a constant the compositor applies for free.
+
+A document written before opacity existed has no field at all; every object in one is
+meant to be fully opaque, so the missing case and the malformed case both land on 1.
 
 ### Text
 
@@ -203,11 +286,12 @@ if you own a licence and want to add one.
 ### Board background
 
 Right-click empty canvas for the background swatches. The choice is saved per easel, so
-different boards can look different. **Arc** is the default: a pale multi-colour wash
-rather than flat paper, which is most of why Arc's boards read as soft.
-**Follow theme** tracks Zen between light and dark mode; the grid contrast is derived
-from whatever the board actually ends up painted, so dots stay visible on a light
-background and a dark one alike.
+different boards can look different. **Follow theme** is the default: it has no colour of
+its own and tracks Zen between light and dark mode, so a new easel comes up already
+matching the browser and keeps matching if the scheme changes under it. The grid contrast
+is derived from whatever the board actually ends up painted, so dots stay visible on a
+light background and a dark one alike. **Arc** is one click away: a pale multi-colour
+wash rather than flat paper, which is most of why Arc's boards read as soft.
 
 Every board is a **tint, not a fill**. All nine presets carry an alpha, and nothing
 between the board and Zen's window paints: `.easel-root` and the page's own `<body>` are
@@ -278,27 +362,31 @@ Grid snapping is still available — set **Snapping** to *Grid* in the mod's set
 
 ### Live web cards
 
-A capture is a screenshot. Press the **▶ button in the card's title strip** and the pixels
+A capture is a screenshot. **Point at the card** and a bar fades in over its bottom edge —
+the site's icon, its title, a **▶** button and an **↗** button. Press **▶** and the pixels
 are replaced by the real page, cropped to exactly the region you captured, and you can
 scroll-free interact with it in place. The button becomes **❚❚**; press it again and the
-screenshot comes back. (Both are in the right-click menu too, as **Show live website** and
-**Show screenshot instead**.)
+screenshot comes back. **↗** opens the source page in a tab. (Both live controls are in the
+right-click menu too, as **Show live website** and **Show screenshot instead**.)
 
-The control sits in the title strip rather than over the picture itself for a reason: the
-strip is the one part of the card a live tile never covers, so the way out is always in the
-same place as the way in.
+A card you are not pointing at is just the picture, edge to edge — which is why the bar
+appears on hover rather than sitting there permanently. It works the same over a running
+site as over a screenshot: a live tile does not take the mouse until you click it, so
+pointing at one still reaches the board underneath.
 
 **Click a live card once and the pointer belongs to the page inside it** — the weather
 widget's day tabs, a dashboard's filters, a video's controls all work, because it is the
-real site. The card is outlined while it has the pointer. `Escape` hands it back to the
-board.
+real site. The bar disappears for as long as the site has the pointer, and the card is
+outlined instead. `Escape` hands it back to the board, and the bar comes back with it.
 
-Since the tile takes the mouse, two things are deliberately routed around it:
+Since the tile takes the mouse once activated, one thing is deliberately routed around it:
 
 - **Right-click always gets the easel's menu**, not the website's, so "Show screenshot
   instead" is never out of reach.
-- **Drag a live card by its title strip** — the footer the easel draws along the bottom
-  is not covered by the tile, so it doubles as the card's handle.
+
+Dragging a live card needs nothing special: until you click it, the tile is transparent to
+the pointer, so pressing anywhere on the card and dragging moves it exactly as a screenshot
+would.
 
 This is the one part of the mod that touches the network, so it is worth being precise:
 
@@ -333,8 +421,8 @@ This is the one part of the mod that touches the network, so it is worth being p
 
 Three ways, because a card whose board is closed cannot be reached by the first:
 
-- The **❚❚** badge in the card's own strip — for a web tile too, which never used to have
-  one because it was always stopped for you.
+- The **❚❚** button in the card's own bar, which appears when you point at it — for a web
+  tile too, which never used to have one because it was always stopped for you.
 - The **live count** in the top bar. It reports everything running in the window,
   including cards on boards you do not have open; click it to stop one, or **Stop all
   live cards**. This is the only route to a card whose board is closed.
@@ -361,6 +449,49 @@ simply do not offer it.
 then cancels an in-progress drag, then drops back to the select tool, then clears the
 selection.
 
+### Chrome over live cards
+
+A live tile is a `<browser>` in the browser window, sitting above this page's whole
+content area. It is not in the page's z-order at all, so the toolbar, the topbar and every
+panel that hangs off them were simply buried by any card that happened to overlap them —
+no `z-index` in the stylesheet can win an argument between two different documents.
+
+Menus solve this by lowering the tile (see below). That is not an answer for the toolbar,
+because the toolbar never goes away: a card sitting over the bottom-left corner would stop
+being live for as long as it stayed there.
+
+So the tile stays up and **a hole is cut in the layer** where each piece of chrome is. The
+pixels in a hole come from the page underneath, which is the chrome, drawn over the canvas
+exactly as it always was. The page measures — they are its elements, and it is the only
+side that knows when one appears — and the host cuts, with a single `clip-path` on the
+layer: an outer ring the size of the layer, then one rounded-rectangle subpath per hole,
+under the even-odd rule.
+
+Two things about that are worth knowing.
+
+**The hole list is a selector list**, in `live-layer.uc.js`. Anything not currently showing
+measures as a zero rect and is skipped, so the list carries no state — a new panel is
+covered by adding a line to it. `.easel-menu` is deliberately absent; see below.
+
+**Two holes that overlap cancel each other out.** Under the even-odd rule a point inside
+two of them has crossed an odd number of edges and counts as inside the shape again, so the
+overlap comes back as painted layer — a hairline of live website lying across whatever two
+pieces of chrome met there. One layout really does that: `.easel-list` and
+`.easel-live-panel` are positioned 34px below a button that is itself a few pixels down
+from the top of a 44px bar, so they begin two or three pixels above its lower edge. The
+rects are made pairwise disjoint before being sent, by shrinking the later one when the
+intersection is a clean band along one of its edges — which is exact, because that band is
+already inside the earlier hole — and by merging into a bounding box when it is not, which
+cuts out slightly more than the two panels cover rather than risk cutting out less.
+
+The chrome's own drop shadow and backdrop blur stay in the page, so a toolbar over a live
+tile blurs the board behind it rather than the website, and its shadow stops at the edge of
+the hole. That is the visible cost of the approach and it is a small one.
+
+One more thing follows from painting being on demand: opening a popup moves nothing on the
+board, so nothing would schedule the frame that would notice it. The few places that show
+or hide a panel call `chromeChanged()` on the page element, which re-measures immediately.
+
 ### Menus over live cards
 
 A live tile is a real `<browser>` owned by the browser window, sitting above the easel
@@ -371,6 +502,10 @@ The menu cannot be raised, so the card is lowered: any tile the menu overlaps is
 while it is open, and the canvas paints that card's screenshot again underneath. Only
 the tiles actually covered, so right-clicking empty board does not make every live card
 on screen blink. The site keeps running throughout — it is hidden, not unloaded.
+
+Menus keep this treatment rather than getting a hole cut for them. A hole would be the
+lighter answer — nothing hidden, nothing repainted — but suppression is the proven path
+and a menu is transient enough not to need it.
 
 ### Web tiles
 
@@ -388,9 +523,29 @@ link, a `/shorts/`, a `/live/` — and you get a web tile pointed at the embed p
 sized 16:9, with a `t=` timestamp carried across if the link had one. That is a URL
 rewrite and nothing more: no new object type, no player of our own, just the tile
 machinery that already existed pointed somewhere better. A watch page inside a 560px
-tile is mostly sidebar, and many of them decline to be framed at all. Arc reaches the
-same place by the same route — its Easel YouTube support runs through
-`YouTubePlayerKit`'s bundled `YouTubePlayer.html`, an IFrame player.
+tile is mostly sidebar. Arc reaches the same place by the same route — its Easel YouTube
+support runs through `YouTubePlayerKit`'s bundled `YouTubePlayer.html`, an IFrame player.
+
+It is the one load in the mod that sends a `Referer`, and that is not decoration. The
+embed player refuses to configure itself for a request that does not say who is
+embedding it: with no such header it answers
+`ERROR_CODE_EMBEDDER_IDENTITY_MISSING_REFERRER`, which the player renders as *"Error 153
+— Video player configuration error"*. Nothing supplies one on its own here, because a
+tile is a top-level document rather than an iframe inside a page.
+
+So a YouTube tile — and only a YouTube tile, matched on the exact URL shape this mod
+builds — is loaded with a referrer of `http://localhost/`. That value is a deliberate
+choice rather than a plausible-looking stand-in: the header names whoever is doing the
+embedding, and anything else would be this mod telling YouTube it is a website it is
+not. `localhost` says the true thing, which is that a local application is asking.
+Passing the video's own page does not work either — YouTube refuses itself with
+`ERROR_CODE_EMBEDDER_IDENTITY_DENIED`.
+
+Worth noting what this means for the rewrite's original rationale. Watch pages declining
+to be framed is an `X-Frame-Options` problem, and a live tile is a top-level browsing
+context in its own `<browser>`, never a frame — so that protection never applied to it.
+The rewrite is kept for the layout reason alone, and the embedder-identity check is the
+price it turned out to carry.
 
 ### Animated images
 
@@ -446,8 +601,11 @@ model is a fixed 3600-unit page with fit-width as the zoom-out limit. At fit-wid
 are indistinguishable; they part company when you resize.
 
 Both are available, per easel, from the canvas right-click menu — **Fit the board to the
-window**. It is off by default, because the fixed page is what every existing board was
-drawn on. Turning it on adopts the current width as the layout width, so nothing moves at
+window**. It is on by default for new easels: a board that is exactly the window is what
+opening a blank easel should give you, and the fixed sheet only earns its keep once there
+is enough on the board to want a page wider than the view. Boards saved before this
+default changed keep the fixed page they were drawn on, and either mode is one click away
+on any board. Switching adopts the current width as the layout width, so nothing moves at
 the moment you switch; from then on the board scales with the window, keeping every
 object's position and size relative to the page, the way Arc's does.
 

@@ -133,6 +133,17 @@
 
     const BACKGROUND_BY_KEY = new Map(BACKGROUNDS.map(b => [b.key, b]));
 
+    // What a board with no colour of its own is. "theme" rather than a fixed paper
+    // colour so a new easel arrives already matching Zen: the stylesheet's light-dark()
+    // tint resolves to the pale wash under a light browser and the dark one under a
+    // dark browser, and it keeps following if the scheme changes underneath it. Any of
+    // the named boards is one menu click away for someone who wants a fixed colour.
+    //
+    // background/store.sys.mjs writes this key into every new document and cannot
+    // import this file — it is a background module, and this one is per window — so the
+    // literal is repeated there with a pointer back to this constant.
+    const DEFAULT_BACKGROUND = "theme";
+
     // Backgrounds that have been renamed or dropped. Applied on load so an existing
     // board moves across instead of silently reverting to the default.
     const BACKGROUND_ALIASES = new Map([["sage", "transparent"]]);
@@ -140,7 +151,7 @@
     // The one place a stored background key is turned into a live one.
     function resolveBackground(key) {
         const aliased = BACKGROUND_ALIASES.get(key) || key;
-        return BACKGROUND_BY_KEY.has(aliased) ? aliased : "arc";
+        return BACKGROUND_BY_KEY.has(aliased) ? aliased : DEFAULT_BACKGROUND;
     }
 
     // The colour to paint under a rasterised board — an export or a library
@@ -228,6 +239,13 @@
     // height. Enough to work into without the page being endlessly, uselessly long.
     const PAGE_TRAILING_SCREENS = 3;
 
+    // Arc's CanvasMode for a board that has not chosen one: "verticallyScrolling" — the
+    // board is the width of the window and reflows with it — rather than the fixed
+    // PAGE_WIDTH sheet. See the note on canvasMode in canvas.uc.js for what the two
+    // modes actually differ on. Repeated as a literal in background/store.sys.mjs,
+    // which writes it into every new document and cannot import this file.
+    const DEFAULT_CANVAS_MODE = "verticallyScrolling";
+
     // Relative luminance of a computed color string, used to decide whether the grid
     // should be drawn dark-on-light or light-on-dark. Alpha is ignored on purpose: a
     // board tint is judged by the colour it is, not by how much of it is showing.
@@ -249,6 +267,22 @@
         return "id-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
     };
 
+    // How see-through an object is drawn, as a fraction. Every object carries one — a
+    // capture and a pen stroke fade the same way — so it lives beside x/y/rotation rather
+    // than inside any one type's sub-object.
+    //
+    // The floor is not zero on purpose. A fully invisible object is still on the board,
+    // still selectable and still in the way, and the only thing it tells you is that
+    // something has gone wrong; MIN leaves a ghost you can find again and drag the slider
+    // back up. STEP is what the slider moves in, kept here so the control and the
+    // validator cannot disagree about which values are representable.
+    const OPACITY = { min: 0.1, max: 1, step: 0.05 };
+
+    const clampOpacity = value => {
+        if (typeof value !== "number" || !Number.isFinite(value)) return 1;
+        return Math.min(OPACITY.max, Math.max(OPACITY.min, value));
+    };
+
     const DEFAULT_SIZE = {
         text: { w: 240, h: 40 },
         shape: { w: 160, h: 120 },
@@ -268,6 +302,11 @@
             x: 0, y: 0,
             w: size.w, h: size.h,
             rotation: 0,
+            opacity: 1,
+            // Pinned to the board: the pointer passes straight through it, so it cannot be
+            // hovered, selected, dragged, resized or edited. Right-click still finds it —
+            // that is the only way back to one, and the only way to unlock it.
+            locked: false,
             color: "black",
             createdAt: now,
             updatedAt: now,
@@ -472,7 +511,7 @@
     // apart is how the hole reopens, so there is exactly one definition, and it lives
     // in an ES module because that is the only form both a window script and a
     // background module can reach.
-    const { isSafeId, isSafeAssetName, safeExternalUrl } =
+    const { isSafeId, isSafeAssetName, safeExternalUrl, safeFaviconUrl } =
         ChromeUtils.importESModule("chrome://sine/content/zen-easel/background/validate.sys.mjs");
 
     /* ------------------------------------------------------------- embedding */
@@ -593,6 +632,15 @@
         obj.w = Math.max(num(obj.w, 10), 0);
         obj.h = Math.max(num(obj.h, 10), 0);
         obj.rotation = num(obj.rotation, 0);
+        // Clamped rather than rejected. A document written before opacity existed has no
+        // field at all, and every one of those objects is meant to be fully opaque — so
+        // the missing case and the malformed case both land on 1.
+        obj.opacity = clampOpacity(obj.opacity);
+        // Coerced rather than trusted, for the same reason shape.filled is: hit-testing
+        // branches on it, and a truthy non-boolean read back from a hand-edited file would
+        // make an object unclickable for a reason nothing in the UI could then explain.
+        // A document written before locking existed has no field, which reads as unlocked.
+        obj.locked = obj.locked === true;
         if (!PALETTE_BY_KEY.has(obj.color)) obj.color = "black";
 
         if (obj.type === "text") {
@@ -652,6 +700,12 @@
             // Store the canonical spec, so what is on disk is already normalised and
             // gets re-validated on every load.
             obj.webcard.url = safeExternalUrl(obj.webcard.url) || "";
+            // The favicon is loaded as a plain <img> by the floating card bar, which is
+            // chrome-privileged DOM in the browser window. screenshot-hook already keeps
+            // only local icons when a capture is taken; this is the same gate applied on the
+            // way back in, so a hand-edited board file cannot turn every render of a card
+            // into a request to somebody's server.
+            obj.webcard.favicon = safeFaviconUrl(obj.webcard.favicon);
             obj.webcard.capture = sanitizeCapture(obj.webcard.capture);
             obj.webcard.useLiveWebCard = obj.webcard.useLiveWebCard === true;
             // Unlike useLiveWebCard this one *is* honoured on load, because the only thing
@@ -661,13 +715,21 @@
             if (!obj.webcard.asset && !obj.webcard.url) return null;
         } else if (obj.type === "webBrowser") {
             // Arc's webBrowser object: a live site embedded in the board, as opposed to a
-            // webcard, which is a screenshot that can be *made* live. There is no asset and
-            // no crop — the tile is simply a window onto the page at the object's own size.
+            // webcard, which is a screenshot that can be *made* live. There is no crop —
+            // the tile is simply a window onto the page at the object's own size.
             if (!obj.webBrowser || typeof obj.webBrowser !== "object") return null;
             obj.webBrowser.url = safeExternalUrl(obj.webBrowser.url) || "";
             if (!obj.webBrowser.url) return null;
             if (typeof obj.webBrowser.title !== "string") obj.webBrowser.title = "";
             obj.webBrowser.muted = obj.webBrowser.muted === true;
+            // The last frame this tile was running, written when it stops. Unlike a
+            // webcard's asset it is not what the object *is* — a tile with no poster is
+            // still a tile, so a bad name is cleared rather than rejecting the object.
+            //
+            // Gated on the same name test every other asset goes through: it is
+            // interpolated into a file path under the easel's own assets directory, and a
+            // board file is hand-editable.
+            if (!isSafeAssetName(obj.webBrowser.poster)) obj.webBrowser.poster = "";
         }
 
         return obj;
@@ -687,6 +749,7 @@
         TITLE_STYLE,
         BACKGROUNDS,
         BACKGROUND_BY_KEY,
+        DEFAULT_BACKGROUND,
         resolveBackground,
         backgroundFill,
         FONTS,
@@ -695,8 +758,11 @@
         TEXT_STYLE_BY_KEY,
         TEXT_FILLS,
         DEFAULT_SIZE,
+        OPACITY,
+        clampOpacity,
         PAGE_WIDTH,
         PAGE_TRAILING_SCREENS,
+        DEFAULT_CANVAS_MODE,
         fontCss,
         luminanceOf,
         rgbOf,

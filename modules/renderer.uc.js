@@ -31,13 +31,34 @@
     const LINE_HEIGHT = 1.35;
     const TEXT_PAD_X = 4;
     const TEXT_PAD_Y = 2;
-    // The URL strip along the top of a webBrowser object. Kept in step with live-layer,
-    // which insets the tile below it.
-    const WEB_BROWSER_BAR = 28;
-    // The title strip along the bottom of a webcard, and the play/pause control inside it.
-    // live-layer.uc.js insets its tile by the footer so the strip stays canvas-drawn.
-    const WEBCARD_FOOTER = 30;
-    const WEBCARD_BADGE = 20;
+    // The floating chrome bar: the favicon, title, play/pause and open-link controls that
+    // fade in over a card's bottom edge while the pointer is on it. Nothing here is drawn
+    // by the canvas — the bar is DOM in the browser window, above the live layer, because
+    // a live card's <browser> covers everything this renderer paints. See
+    // modules-host/live-host.uc.js. What lives here is only its *geometry*, because the
+    // canvas is what hit-tests the clicks: webcardChromeRects() is the single source both
+    // sides read.
+    const CHROME_BAR_HEIGHT = 34;
+    const CHROME_BAR_INSET = 10;
+    const CHROME_BUTTON = 24;
+    const CHROME_FAVICON = 18;
+    const CHROME_GAP = 6;
+    const CHROME_PAD = 8;
+    // Narrow cards shed parts of the bar rather than losing it: a phone-shaped capture is
+    // exactly the case where the controls are least reachable by other means, so dropping
+    // the whole bar there was the wrong trade. The title goes first — below this much room
+    // it is an ellipsis and nothing else — and then the favicon, leaving a compact pill of
+    // just the buttons.
+    const CHROME_LABEL_MIN = 36;
+    // The floor: a bar with no room for even one button is a strip of tint over a picture,
+    // so the card keeps its chrome off entirely and the context menu is the way in.
+    const CHROME_MIN_HEIGHT = 64;
+
+    // The hover halo. Held clear of the object's own edge so it still reads around a live
+    // card, whose interior belongs to a <browser> drawn above this canvas. See
+    // _drawHoverGlow.
+    const HOVER_GLOW_OUTSET = 3;
+    const HOVER_GLOW_BLUR = 16;
 
     // Registered through the FontFace API rather than relying on the @font-face rules
     // in chrome.css. Canvas resolves ctx.font against document.fonts, and a face that
@@ -428,6 +449,12 @@
             // the scale for the blit and put it back afterwards.
             ctx.save();
             ctx.setTransform(1, 0, 0, 1, 0, 0);
+            // Applied to the blit, not baked into the bitmap, and deliberately absent from
+            // the cache key: dragging the opacity slider over a board of ink would
+            // otherwise re-rasterise every stroke on every frame, to produce pixels that
+            // differ only by a constant the compositor can apply for free.
+            const opacity = obj.opacity === undefined ? 1 : obj.opacity;
+            if (opacity < 1) ctx.globalAlpha = opacity;
             const origin = {
                 x: (obj.x * view.zoom + view.panX) * this.dpr,
                 y: (obj.y * view.zoom + view.panY) * this.dpr
@@ -478,6 +505,14 @@
 
         drawObject(ctx, obj, view) {
             ctx.save();
+            // Set once here rather than in each _draw* method, for the same reason the
+            // rotation is: opacity is a property of the object, not of what it happens to
+            // be made of, and a shape, a caption and a capture all have to fade
+            // identically. Anything a _draw* method does to globalAlpha afterwards has to
+            // multiply into this rather than replace it.
+            const opacity = obj.opacity === undefined ? 1 : obj.opacity;
+            if (opacity < 1) ctx.globalAlpha = opacity;
+
             if (obj.rotation) {
                 const cx = obj.x + obj.w / 2;
                 const cy = obj.y + obj.h / 2;
@@ -491,7 +526,7 @@
                 case "ink": this._drawInk(ctx, obj); break;
                 case "text": this._drawText(ctx, obj); break;
                 case "image": this._drawImage(ctx, obj); break;
-                case "webcard": this._drawWebcard(ctx, obj, view); break;
+                case "webcard": this._drawWebcard(ctx, obj); break;
                 case "webBrowser": this._drawWebBrowser(ctx, obj); break;
             }
             ctx.restore();
@@ -663,7 +698,7 @@
             // with is shown as a prompt rather than as content, so an untouched board does
             // not look like someone deliberately wrote "Untitled Easel" on it.
             if (!hugging && this.host.canvas && this.host.canvas.isPlaceholderTitle(obj)) {
-                ctx.globalAlpha = 0.32;
+                ctx.globalAlpha *= 0.32;
             }
 
             // Half-leading. A CSS line box centres the glyphs in its line-height, so a
@@ -694,10 +729,17 @@
             }
         }
 
-        _drawWebcard(ctx, obj, view) {
-            const footerHeight = obj.webcard.asset ? WEBCARD_FOOTER : obj.h;
-            const imageHeight = Math.max(obj.h - footerHeight, 0);
-
+        // Full-bleed. The card used to reserve a 30px strip along its bottom for a
+        // canvas-drawn title and play control; that strip is now a floating bar that fades
+        // in on hover, drawn as DOM above the live layer. Two things follow.
+        //
+        // The picture gets the whole box back — and it was never given room for the strip in
+        // the first place: capture-page._fitSize sizes a card to the screenshot's own aspect
+        // ratio, so the cover-fit below was quietly cropping 30px off every capture to make
+        // space for chrome.
+        //
+        // And the tile is no longer inset, so a live card is the site edge to edge.
+        _drawWebcard(ctx, obj) {
             // A live card's pixels come from a real <browser> sitting above this canvas.
             // Leave a hole rather than painting the stale screenshot underneath it: a page
             // with any transparency would show the old capture ghosting through.
@@ -710,13 +752,12 @@
             //              whether to paint the screenshot — a card whose tile is hidden for
             //              any reason (menu over it, mid-drag, scrolled off) needs it back,
             //              or it is a hole.
-            //   isLive     is the site loaded and running. Decides the badge glyph only. A
-            //              card scrolled off the board is still live, and drawing ▶ for it
-            //              would invite a second mount of something already mounted.
+            //
+            // There used to be a second question here — isLive, is the site loaded and
+            // running — because the badge glyph turned on it. The badge is DOM now and the
+            // bar asks it for itself, so only the painting question is left.
             const showsTile = !this._snapshotting && this.host.live
                 ? this.host.live.showsTile(obj.id) : false;
-            const isLive = !this._snapshotting && this.host.live
-                ? this.host.live.isLive(obj.id) : false;
 
             ctx.save();
             ctx.beginPath();
@@ -729,166 +770,149 @@
             ctx.fillStyle = this._panelColor();
             ctx.fillRect(obj.x, obj.y, obj.w, obj.h);
 
-            // Only the screenshot is skipped. The footer strip below stays canvas-drawn,
-            // and the live tile is deliberately sized to the image area alone so it does
-            // not cover it — a live card keeps the same title bar as a static one.
+            // The tile covers the whole card now, so there is nothing left underneath it
+            // worth painting — the picture is skipped entirely while it shows.
             if (obj.webcard.asset && !showsTile) {
                 const image = this._image(obj.webcard.asset);
                 if (image) {
                     // Cover, not stretch: captures keep their aspect ratio the way the
-                    // old object-fit:cover did.
-                    const scale = Math.max(obj.w / image.width, imageHeight / image.height);
+                    // old object-fit:cover did. No clip of its own — the picture now fills
+                    // the whole card, so the rounded-rect clip above already bounds it, and
+                    // a square one inside that only undid the corners.
+                    const scale = Math.max(obj.w / image.width, obj.h / image.height);
                     const dw = image.width * scale;
                     const dh = image.height * scale;
-                    ctx.save();
-                    ctx.beginPath();
-                    ctx.rect(obj.x, obj.y, obj.w, imageHeight);
-                    ctx.clip();
-                    ctx.drawImage(image, obj.x + (obj.w - dw) / 2, obj.y + (imageHeight - dh) / 2, dw, dh);
-                    ctx.restore();
+                    ctx.drawImage(image, obj.x + (obj.w - dw) / 2, obj.y + (obj.h - dh) / 2, dw, dh);
                 }
             }
 
-            // The play/pause control, drawn before the label so the label knows to make room.
-            const badge = this.liveBadgeRect(obj);
-            const showBadge = badge && !this._snapshotting &&
-                (isLive || (this.host.live && this.host.live.canGoLive(obj)));
-            const showMuted = showBadge && this.host.live && this.host.live.isMuted(obj);
-            if (showBadge) this._drawLiveBadge(ctx, badge, isLive);
-            if (showMuted) this._drawMutedGlyph(ctx, badge);
-
-            const label = obj.webcard.title || obj.webcard.url || "";
-            if (label) {
-                const size = obj.webcard.asset ? 12 : 13;
-                ctx.font = `${size}px system-ui, sans-serif`;
-                ctx.fillStyle = this._mutedColor();
-                ctx.textBaseline = "middle";
-                ctx.textAlign = "left";
-                const textY = obj.webcard.asset ? obj.y + imageHeight + footerHeight / 2 : obj.y + obj.h / 2;
-                const room = obj.w - 18 - (showBadge ? badge.w + 8 : 0)
-                    - (showMuted ? badge.h * 0.62 + 6 : 0);
-                ctx.fillText(this._ellipsize(ctx, label, room), obj.x + 9, textY);
+            // A card with pixels says what it is by showing them, and its title is in the
+            // hover bar. A card with only a link has nothing to show, so the label is all
+            // there is — it stays canvas-drawn and centred, or the card is a blank panel
+            // until you happen to point at it.
+            if (!obj.webcard.asset) {
+                const label = obj.webcard.title || obj.webcard.url || "";
+                if (label) {
+                    ctx.font = "13px system-ui, sans-serif";
+                    ctx.fillStyle = this._mutedColor();
+                    ctx.textBaseline = "middle";
+                    ctx.textAlign = "center";
+                    ctx.fillText(this._ellipsize(ctx, label, obj.w - 18),
+                        obj.x + obj.w / 2, obj.y + obj.h / 2);
+                }
             }
             ctx.restore();
         }
 
-        // Where the play/pause control sits: the right-hand end of the title strip.
+        // The floating chrome bar's geometry, in world coordinates, or null for a card too
+        // small to carry one.
         //
-        // Deliberately in the footer rather than over the card's art, because the art is
-        // exactly what a live tile covers — a control drawn there would be behind the
-        // website the moment it was needed to turn it off. The footer is canvas-drawn in
-        // both states, so one control works for both.
+        // The bar itself is not drawn here — it is DOM in the browser window, because a
+        // live card's <browser> sits above every canvas this renderer owns and would bury
+        // anything painted into it. What the renderer still owns is *where* the bar and its
+        // controls are, because the canvas is what hit-tests the clicks: a pointer over a
+        // non-activated tile reaches the page, not the tile, so the board answers for both
+        // states with one hit test. One definition, so the thing you click and the thing
+        // you see cannot drift apart.
         //
-        // Returns world coordinates, or null for a card with no strip to put it in.
+        // Both object types get a bar. A webBrowser's used to be a URL strip pinned across
+        // its top; it is the same floating bar at the bottom now, so the two read as one
+        // component and there is only one of them to style.
         //
-        // Both object types get one, and for the same reason. A web tile used to have no
-        // pause control at all — it was mounted by a plain click and only ever stopped by
-        // the offscreen sweep or the tab being backgrounded. Now that neither of those
-        // happens, the badge is the only thing standing between a running web tile and one
-        // that cannot be stopped short of deleting the card.
+        //   bar      the pill itself
+        //   favicon  the site icon disc at its left, or null on a card too narrow for one
+        //   label    what is left over for the title, or null when that is nothing useful
+        //   play     play when static, pause when live, or null if this card has neither
+        //   link     opens the source page in a tab, or null if the card has no link
         //
-        // A web tile's strip is at the top rather than the bottom, because that is where its
-        // URL bar is and the tile is inset below it.
-        liveBadgeRect(obj) {
+        // `has` says which buttons the bar carries — an older capture has no live geometry
+        // and gets no play button, a card saved without a URL gets no link. It has to be an
+        // input rather than something the caller trims afterwards, because everything is
+        // packed against one edge or the other: dropping a button moves its neighbour, and a
+        // rect built as though both were there would be a control you can see in one place
+        // and click in another. The DOM side packs them the same way, from the same flags,
+        // which is what the returned nulls are for.
+        //
+        // The buttons are what the bar is *for*, so they are laid out first and the label
+        // and favicon take what is left. A narrow card — a phone-shaped capture, say —
+        // therefore keeps its controls and loses its title, rather than losing the bar and
+        // with it the only way to play the card without going to the context menu.
+        webcardChromeRects(obj, has = { play: true, link: true }) {
             if (!obj) return null;
+            if (obj.type !== "webcard" && obj.type !== "webBrowser") return null;
+            if (obj.h < CHROME_MIN_HEIGHT) return null;
 
-            if (obj.type === "webBrowser") {
-                const strip = Math.min(WEB_BROWSER_BAR, obj.h);
-                const size = Math.min(WEBCARD_BADGE, strip - 8);
-                if (size <= 0 || obj.w < size * 3) return null;
-                return {
-                    x: obj.x + obj.w - size - 8,
-                    y: obj.y + (strip - size) / 2,
-                    w: size,
-                    h: size
-                };
-            }
-
-            if (obj.type !== "webcard" || !obj.webcard.asset) return null;
-            const size = Math.min(WEBCARD_BADGE, WEBCARD_FOOTER - 8);
-            if (size <= 0 || obj.w < size * 3) return null;
-            return {
-                x: obj.x + obj.w - size - 8,
-                y: obj.y + Math.max(obj.h - WEBCARD_FOOTER, 0) + (WEBCARD_FOOTER - size) / 2,
-                w: size,
-                h: size
+            const bar = {
+                x: obj.x + CHROME_BAR_INSET,
+                y: obj.y + obj.h - CHROME_BAR_INSET - CHROME_BAR_HEIGHT,
+                w: obj.w - CHROME_BAR_INSET * 2,
+                h: CHROME_BAR_HEIGHT
             };
-        }
 
-        // A crossed-out speaker, drawn to the left of the play/pause badge and only for a
-        // card that is actually muted. Only when muted, so a board where nobody has touched
-        // the setting looks exactly as it did — the glyph is a state worth noticing, not a
-        // control worth advertising.
-        _drawMutedGlyph(ctx, badge) {
-            const size = badge.h * 0.62;
-            const cx = badge.x - 6 - size / 2;
-            const cy = badge.y + badge.h / 2;
-            const w = size / 2;
+            const midY = bar.y + bar.h / 2;
+            const buttonY = midY - CHROME_BUTTON / 2;
 
-            ctx.save();
-            ctx.strokeStyle = this._mutedColor();
-            ctx.fillStyle = this._mutedColor();
-            ctx.lineWidth = Math.max(1, size * 0.12);
-            ctx.lineCap = "round";
+            // Right to left, in reverse of the order they appear, so each one lands where
+            // the flex row will put it once the absent ones are gone.
+            let right = bar.x + bar.w - CHROME_PAD;
+            const take = () => {
+                const rect = { x: right - CHROME_BUTTON, y: buttonY, w: CHROME_BUTTON, h: CHROME_BUTTON };
+                right = rect.x - CHROME_GAP;
+                return rect;
+            };
 
-            // The cone, as a solid wedge — at this size anything more detailed is mush.
-            ctx.beginPath();
-            ctx.moveTo(cx - w, cy - w * 0.35);
-            ctx.lineTo(cx - w * 0.25, cy - w * 0.35);
-            ctx.lineTo(cx + w * 0.35, cy - w);
-            ctx.lineTo(cx + w * 0.35, cy + w);
-            ctx.lineTo(cx - w * 0.25, cy + w * 0.35);
-            ctx.lineTo(cx - w, cy + w * 0.35);
-            ctx.closePath();
-            ctx.fill();
+            const wanted = (has.link ? 1 : 0) + (has.play ? 1 : 0);
+            const buttonsWidth = wanted * CHROME_BUTTON + Math.max(wanted - 1, 0) * CHROME_GAP;
+            // Not even one button fits between the paddings, so there is no bar worth
+            // drawing. This is the only width that turns the chrome off outright.
+            if (bar.w < CHROME_PAD * 2 + buttonsWidth || buttonsWidth === 0) return null;
 
-            ctx.beginPath();
-            ctx.moveTo(cx + w * 0.6, cy - w * 0.5);
-            ctx.lineTo(cx + w * 1.2, cy + w * 0.5);
-            ctx.moveTo(cx + w * 1.2, cy - w * 0.5);
-            ctx.lineTo(cx + w * 0.6, cy + w * 0.5);
-            ctx.stroke();
-            ctx.restore();
-        }
+            const link = has.link ? take() : null;
+            const play = has.play ? take() : null;
 
-        _drawLiveBadge(ctx, rect, isLive) {
-            const cx = rect.x + rect.w / 2;
-            const cy = rect.y + rect.h / 2;
-            const r = rect.w / 2;
+            // `right` is now one gap to the left of the leftmost button, which is exactly
+            // where the content before it has to stop — CHROME_GAP is the flex row's `gap`,
+            // and CHROME_PAD only ever applies at the bar's own two edges. Keeping those two
+            // distinct is what makes this arithmetic and the stylesheet agree item for item.
+            const contentX = bar.x + CHROME_PAD;
+            const room = right - contentX;
 
-            ctx.save();
-            ctx.beginPath();
-            ctx.arc(cx, cy, r, 0, Math.PI * 2);
-            ctx.fillStyle = isLive ? this._accentColor() : this._withAlpha(this._mutedColor(), 0.18);
-            ctx.fill();
+            // The favicon outlives the title, not the other way round. It identifies the
+            // site in 18 units where a title that narrow is three letters and an ellipsis —
+            // and the card is a picture of the page anyway, so the title is the part it can
+            // most afford to lose.
+            const showLabel = room >= CHROME_FAVICON + CHROME_GAP + CHROME_LABEL_MIN;
+            const showFavicon = room >= CHROME_FAVICON;
 
-            ctx.fillStyle = isLive ? "#ffffff" : this._mutedColor();
-            if (isLive) {
-                // Pause: two bars, meaning "stop the site and give me the picture back".
-                const barW = r * 0.26;
-                const barH = r * 0.9;
-                ctx.fillRect(cx - barW * 1.6, cy - barH / 2, barW, barH);
-                ctx.fillRect(cx + barW * 0.6, cy - barH / 2, barW, barH);
-            } else {
-                // Play, nudged right so the triangle looks centred rather than measuring so.
-                const s = r * 0.62;
-                ctx.beginPath();
-                ctx.moveTo(cx - s * 0.55 + 1, cy - s);
-                ctx.lineTo(cx + s + 1, cy);
-                ctx.lineTo(cx - s * 0.55 + 1, cy + s);
-                ctx.closePath();
-                ctx.fill();
-            }
-            ctx.restore();
+            const favicon = showFavicon ? {
+                x: contentX,
+                y: midY - CHROME_FAVICON / 2,
+                w: CHROME_FAVICON,
+                h: CHROME_FAVICON
+            } : null;
+
+            const labelX = favicon ? favicon.x + favicon.w + CHROME_GAP : contentX;
+            const label = showLabel ? {
+                x: labelX,
+                y: bar.y,
+                w: Math.max(right - labelX, 0),
+                h: bar.h
+            } : null;
+
+            return { bar, favicon, label, play, link };
         }
 
         // Arc's webBrowser object. Unlike a webcard there is no screenshot to fall back on:
-        // what the canvas paints is the frame and the URL strip, and the page itself is a
-        // live tile above it. When no tile is mounted this is all there is, which is why it
-        // says what it is waiting for rather than sitting blank.
+        // what the canvas paints is the frame, and the page itself is a live tile above it.
+        // When no tile is mounted this is all there is, which is why it says what it is
+        // waiting for rather than sitting blank.
+        //
+        // The URL strip that used to run across the top is gone. It existed because the
+        // tile was inset below it and it was therefore the one part of the object a live
+        // <browser> could not cover; now that the bar floats and is drawn above the tile
+        // rather than beside it, a webBrowser wears the same hover bar a webcard does, at
+        // the same edge. One component, one place to style it.
         _drawWebBrowser(ctx, obj) {
-            const barHeight = Math.min(WEB_BROWSER_BAR, obj.h);
-
             ctx.save();
             ctx.beginPath();
             this._roundRect(ctx, obj.x, obj.y, obj.w, obj.h, 10);
@@ -897,16 +921,10 @@
             ctx.fillStyle = this._panelColor();
             ctx.fillRect(obj.x, obj.y, obj.w, obj.h);
 
-            // The strip is at the top, the way a browser's is — and the way the webcard's
-            // title strip deliberately is not, so the two are never mistaken for each other.
-            ctx.fillStyle = this._withAlpha(this._mutedColor(), 0.08);
-            ctx.fillRect(obj.x, obj.y, obj.w, barHeight);
-
-            // Three questions, and they are not the same question.
+            // Two questions, and they are not the same question.
             //
-            //   isLive     is the site loaded and running. Drives the badge glyph, and
-            //              distinguishes "loaded but not on screen" from "not loaded" for
-            //              the placeholder below.
+            //   isLive     is the site loaded and running. Distinguishes "loaded but not on
+            //              screen" from "not loaded" for the placeholder below.
             //   showsTile  are the tile's pixels on screen right now.
             //
             // Keying the placeholder off showsTile alone told you to load a page that was
@@ -915,37 +933,85 @@
             const isLive = !this._snapshotting && live ? live.isLive(obj.id) : false;
             const showsTile = !this._snapshotting && live ? live.showsTile(obj.id) : false;
 
-            // Drawn before the label so the label knows to make room, the same way the
-            // webcard's footer does it.
-            const badge = this.liveBadgeRect(obj);
-            const showBadge = badge && !this._snapshotting &&
-                (isLive || (live && live.canGoLive(obj)));
-            const showMuted = showBadge && live && live.isMuted(obj);
-            if (showBadge) this._drawLiveBadge(ctx, badge, isLive);
-            if (showMuted) this._drawMutedGlyph(ctx, badge);
-
-            const label = obj.webBrowser.title || obj.webBrowser.url || "";
-            if (label) {
-                ctx.font = "12px system-ui, sans-serif";
-                ctx.fillStyle = this._mutedColor();
-                ctx.textBaseline = "middle";
-                ctx.textAlign = "left";
-                const room = obj.w - 18 - (showBadge ? badge.w + 8 : 0)
-                    - (showMuted ? badge.h * 0.62 + 6 : 0);
-                ctx.fillText(
-                    this._ellipsize(ctx, label, room), obj.x + 9, obj.y + barHeight / 2
-                );
+            // The last frame this tile was running, if it has ever run. A web tile is not
+            // born from a picture the way a webcard is, so for a long time whatever the
+            // tile was not painting was a blank panel with a URL on it — which is a poor
+            // answer for a video, where the poster frame is most of what identifies it.
+            //
+            // Cover-fit inside the rounded clip already set above, exactly as a webcard's
+            // capture is: the poster was taken at the tile's aspect ratio, and the card can
+            // be resized afterwards.
+            const poster = !showsTile && obj.webBrowser.poster
+                ? this._image(obj.webBrowser.poster) : null;
+            if (poster) {
+                const scale = Math.max(obj.w / poster.width, obj.h / poster.height);
+                const dw = poster.width * scale;
+                const dh = poster.height * scale;
+                ctx.drawImage(poster, obj.x + (obj.w - dw) / 2, obj.y + (obj.h - dh) / 2, dw, dh);
             }
+
+            // The strip along the bottom that the floating bar will occupy, on a card tall
+            // enough to wear one. Nothing the canvas draws may sit in it: the bar is DOM
+            // above this canvas and the canvas is never repainted for a hover, so anything
+            // put there is not covered up temporarily — it is covered up for as long as the
+            // pointer is on the card, which is exactly when it is being read.
+            const barStrip = obj.h >= CHROME_MIN_HEIGHT
+                ? CHROME_BAR_INSET + CHROME_BAR_HEIGHT : 0;
 
             // Three states, not two. A web tile has no screenshot to fall back on, so
             // whatever the tile is not painting, this has to say something about.
-            if (!showsTile) {
+            //
+            // Unless it does now. A poster says what the card is far better than its URL
+            // does, so the label is dropped once there is one — but "Click to load this
+            // page" stays, because a picture of a stopped site is exactly the thing that
+            // needs saying it is stopped. It gets a scrim to sit on rather than being
+            // painted straight onto the screenshot, where it would be unreadable as often
+            // as not.
+            if (!showsTile && poster) {
+                // A strip rather than centred type: the words have to be legible over
+                // whatever frame the site happened to stop on, and there is no colour that
+                // is safe against an arbitrary screenshot. The band is the board's own
+                // panel colour, so it reads as the easel's chrome sitting on the card
+                // rather than as part of the picture.
+                //
+                // Stacked on top of the bar's strip rather than at the card's own bottom
+                // edge, or the bar would land on the very sentence saying the card is
+                // stopped. Cards too short for a bar keep the edge.
+                const bottom = obj.y + obj.h - barStrip;
+                const band = Math.min(34, bottom - obj.y);
+                if (band > 0) {
+                    ctx.fillStyle = this._withAlpha(this._panelColor(), 0.82);
+                    ctx.fillRect(obj.x, bottom - band, obj.w, band);
+                    ctx.font = "13px system-ui, sans-serif";
+                    ctx.fillStyle = this._withAlpha(this._mutedColor(), isLive ? 0.55 : 0.85);
+                    ctx.textAlign = "center";
+                    ctx.textBaseline = "middle";
+                    ctx.fillText(isLive ? "Running" : "Click to load this page",
+                        obj.x + obj.w / 2, bottom - band / 2);
+                }
+            } else if (!showsTile) {
+                // Centred in what is left after the bar's strip rather than in the whole
+                // card. Only bites on a card shrunk to under about twice the bar's height,
+                // where the card's own middle is inside the strip — but there that is the
+                // whole of what the card has to say, vanishing under the bar on hover.
+                const middle = obj.y + (obj.h - barStrip) / 2;
+
+                const label = obj.webBrowser.title || obj.webBrowser.url || "";
+                if (label) {
+                    ctx.font = "12px system-ui, sans-serif";
+                    ctx.fillStyle = this._withAlpha(this._mutedColor(), 0.75);
+                    ctx.textAlign = "center";
+                    ctx.textBaseline = "alphabetic";
+                    ctx.fillText(this._ellipsize(ctx, label, obj.w - 24),
+                        obj.x + obj.w / 2, middle - 8);
+                }
+
                 ctx.font = "13px system-ui, sans-serif";
                 ctx.fillStyle = this._withAlpha(this._mutedColor(), isLive ? 0.45 : 0.7);
                 ctx.textAlign = "center";
-                ctx.textBaseline = "middle";
+                ctx.textBaseline = "top";
                 ctx.fillText(isLive ? "Running" : "Click to load this page",
-                    obj.x + obj.w / 2, obj.y + barHeight + (obj.h - barHeight) / 2);
+                    obj.x + obj.w / 2, middle + 4);
             }
 
             ctx.strokeStyle = this._withAlpha(this._mutedColor(), 0.25);
@@ -1117,11 +1183,56 @@
 
         /* -------------------------------------------------------------- overlay */
 
+        // A soft accent halo around whatever the pointer is resting on.
+        //
+        // Drawn *outside* the object's box rather than on its boundary, and that is the
+        // whole trick: a live card is a <browser> sitting above every canvas here, so a ring
+        // painted on the edge would have its inner half buried and read as a different
+        // effect on a live card than on a static one. Kept clear of the box, it is the same
+        // halo either way.
+        //
+        // Screen space, like the rest of the overlay, so it stays the same weight at any
+        // zoom instead of thickening as the board is magnified.
+        _drawHoverGlow(ctx, hover, accent) {
+            const box = hover.box;
+            const inset = -HOVER_GLOW_OUTSET;
+
+            ctx.save();
+            if (hover.rotation) {
+                const cx = box.x + box.w / 2;
+                const cy = box.y + box.h / 2;
+                ctx.translate(cx, cy);
+                ctx.rotate((hover.rotation * Math.PI) / 180);
+                ctx.translate(-cx, -cy);
+            }
+
+            ctx.shadowColor = this._withAlpha(accent, 0.75);
+            ctx.shadowBlur = HOVER_GLOW_BLUR;
+            ctx.strokeStyle = this._withAlpha(accent, 0.55);
+            ctx.lineWidth = 1.5;
+
+            // Twice, because one pass of a shadowed stroke is faint — the blur spreads the
+            // ink both ways and most of it lands outside. The second pass is what makes the
+            // halo read as a glow rather than a smudge, and it costs one more stroke of a
+            // rectangle.
+            ctx.beginPath();
+            this._roundRect(ctx, box.x + inset, box.y + inset,
+                box.w - inset * 2, box.h - inset * 2, 8);
+            ctx.stroke();
+            ctx.stroke();
+
+            ctx.restore();
+        }
+
         renderOverlay(state) {
             const ctx = this.overlayCtx;
             this._begin(ctx, null);
 
             const accent = this._accentColor();
+
+            // The hover halo, first — it belongs under everything else the overlay draws,
+            // and a marquee sweeping across the board should pass over it rather than under.
+            if (state.hover) this._drawHoverGlow(ctx, state.hover, accent);
 
             if (state.marquee) {
                 const m = state.marquee;
