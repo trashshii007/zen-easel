@@ -297,6 +297,91 @@
             };
         }
 
+        // What the page was, at the moment the picture was taken: the layout box it was laid
+        // out in, where it was scrolled to, and whether that offset is reproducible.
+        //
+        // Public, and the one place the measurement actor is asked for a viewport, because
+        // there are two kinds of capture that need it — the ones this file takes, and the
+        // ones Zen's own screenshot UI takes and hands to screenshot-hook.uc.js. A second
+        // copy of this is how one of the two silently stops being live-capable.
+        //
+        // Returns null when the measurement is unavailable or unusable, which simply means
+        // the card built from this capture will never offer to go live. Said out loud rather
+        // than logged behind the debug pref: a card that quietly comes back with no live
+        // control is exactly the failure that cannot be told apart from a bug.
+        async measureViewport(browser) {
+            try {
+                const windowGlobal = browser && browser.browsingContext &&
+                    browser.browsingContext.currentWindowGlobal;
+                if (!windowGlobal) {
+                    console.warn("[zen-easel] no window global to measure; " +
+                        "this capture will not be live-capable");
+                    return null;
+                }
+
+                const viewport = await this._query(windowGlobal);
+                if (!viewport) {
+                    console.warn("[zen-easel] the page reported no viewport; " +
+                        "this capture will not be live-capable");
+                    return null;
+                }
+
+                // A site that scrolls an inner container rather than the document cannot
+                // have its offset reproduced by the tile — win.scrollTo has nothing to
+                // act on, so the card would come back live and confidently show the top
+                // of the page instead of what was captured. Recording no capture at all
+                // means the card simply never offers to go live, which is the honest
+                // version of the same answer.
+                if (viewport.documentScrolls === false) {
+                    console.warn("[zen-easel] this page scrolls an inner container, so the " +
+                        "scroll position cannot be reproduced; this capture will not be live-capable");
+                    return null;
+                }
+
+                return viewport;
+            } catch (e) {
+                console.warn("[zen-easel] could not measure the page for a live card:", e);
+                return null;
+            }
+        }
+
+        // The measurement round trip, with one repair attempt behind it.
+        //
+        // getActor throws when the registration this process is holding does not match the
+        // window being asked. Registration happens once per process, from a background
+        // module whose top level never runs again, while this file is re-run on every mod
+        // reload — so a registration made before the actor definition was last edited stands
+        // for the rest of the browser's life, and nothing about it is visible: captures keep
+        // landing on the board and simply stop being live-capable.
+        //
+        // Re-registering here is what closes that gap, and it has to go through
+        // actors.sys.mjs rather than registry.sys.mjs: the registry is one of those cached
+        // background modules, so asking *it* to re-register only reinstalls whatever it was
+        // holding. See the header in actors.sys.mjs.
+        //
+        // Only ZenEaselCapture is repaired. It is inert and has no instances to disturb;
+        // the live actor is running inside every mounted tile and is not to be touched from
+        // here.
+        //
+        // A second failure is left to the caller, which reports it — at that point the
+        // definition itself is wrong rather than merely out of date.
+        async _query(windowGlobal) {
+            try {
+                return await windowGlobal.getActor("ZenEaselCapture")
+                    .sendQuery("ZenEaselCapture:Measure");
+            } catch (e) {
+                console.warn("[zen-easel] the capture actor did not answer, re-registering " +
+                    "it and trying once more:", e);
+            }
+
+            const { ensureActor } = ChromeUtils.importESModule(
+                "chrome://sine/content/zen-easel/background/actors.sys.mjs");
+            if (!ensureActor("ZenEaselCapture")) return null;
+
+            return windowGlobal.getActor("ZenEaselCapture")
+                .sendQuery("ZenEaselCapture:Measure");
+        }
+
         // The geometry a live web card needs later: the viewport size and scroll offset at
         // capture time, plus the selected rect in viewport coordinates. Persisting the
         // rect rather than a CSS selector is what makes a live card degrade to "the wrong
@@ -306,20 +391,8 @@
         // will never offer to go live.
         async _captureLayout(browser, region, browserRect, type = "partialPage") {
             try {
-                const windowGlobal = browser.browsingContext?.currentWindowGlobal;
-                if (!windowGlobal) return null;
-
-                const actor = windowGlobal.getActor("ZenEaselCapture");
-                const viewport = await actor.sendQuery("ZenEaselCapture:Measure");
+                const viewport = await this.measureViewport(browser);
                 if (!viewport) return null;
-
-                // A site that scrolls an inner container rather than the document cannot
-                // have its offset reproduced by the tile — win.scrollTo has nothing to
-                // act on, so the card would come back live and confidently show the top
-                // of the page instead of what was captured. Recording no capture at all
-                // means the card simply never offers to go live, which is the honest
-                // version of the same answer.
-                if (viewport.documentScrolls === false) return null;
 
                 // The overlay is positioned over the <browser>, so the region is already
                 // in the browser's own CSS pixels once the origin is subtracted. Page zoom
@@ -344,7 +417,7 @@
                     }
                 };
             } catch (e) {
-                this.log("could not measure the capture layout:", e.message);
+                console.warn("[zen-easel] could not work out the capture layout:", e);
                 return null;
             }
         }

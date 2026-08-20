@@ -443,6 +443,10 @@ normal new tab rather than navigating the card away from what you captured.
 Only cards captured since this version carry the geometry needed to go live; older ones
 simply do not offer it.
 
+A card that ends up without that geometry looks exactly like one that has it, so the
+difference is only visible by right-clicking and finding no **Show live website**. When it
+happens the browser console says why — see the warnings from `capture-host.uc.js`.
+
 ### Escape
 
 `Escape` walks a cascade rather than closing straight away: it steps out of a live card,
@@ -709,7 +713,8 @@ window still open.
 
 | | |
 |---|---|
-| `background/registry.sys.mjs` | registers `about:easel` and the two window actors |
+| `background/registry.sys.mjs` | registers `about:easel`, and installs the actors at boot |
+| `background/actors.sys.mjs` | what the two window actors are, and how to install them |
 | `background/store.sys.mjs` | owns the disk: index, write queue, shutdown blocker, asset sweep |
 | `background/validate.sys.mjs` | the URL/id/asset-name rules, shared by everything |
 
