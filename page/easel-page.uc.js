@@ -194,6 +194,17 @@
             }
         }
 
+        // Told by whatever just showed or hid a panel of this page's own. Live tiles are
+        // <browser> elements above this whole document, and the only thing keeping them off
+        // the toolbar and the topbar is a hole cut in their layer where each piece of chrome
+        // is — see live-layer's syncChromeClip.
+        //
+        // Needed because painting here is on demand: a popup opening moves nothing on the
+        // board, so nothing would schedule the frame that would otherwise notice it.
+        chromeChanged() {
+            this.live?.syncChromeClip();
+        }
+
         _showError(e) {
             const message = e && e.message ? e.message : String(e);
             (this.viewport || this.shadowRoot).appendChild(el("div", {
@@ -368,11 +379,6 @@
             await this.element.capture.addCaptureToDocument(result);
         }
 
-        // There is no switchTo() here any more either. It existed so the chrome window
-        // could swap the board inside an already-open tab, and the chrome window stopped
-        // doing that when boards got a tab each — openEasel now focuses or opens the right
-        // tab instead, and library.switchTo asks it to. Nothing was left calling this.
-
         // Called by ZenEaselLiveParent when a right-click lands inside a live card. The
         // coordinates arrive in screen space, which is the one frame of reference both
         // sides share without either needing to know about the tile's scale or crop.
@@ -414,12 +420,6 @@
             element.live.forget(objectId);
             if (reason) element.toast(reason);
         }
-
-        // There is no createNew() here any more. It made a board and swapped it into *this*
-        // tab, which is the one thing a fresh easel must not do now that boards have a tab
-        // each — its only caller, a capture asking for a new easel, would have taken away
-        // the board you were looking at. The chrome window's createEasel() makes the
-        // document first and opens a tab for it; see openWithCapture.
 
         // pagehide is the only guaranteed notification a tab gets, and it cannot await.
         // Handing the serialised document to the background queue is synchronous, and

@@ -93,7 +93,11 @@
                 // letters upright while you typed and drop them back on commit.
                 // transform-origin is the box's centre for the same reason.
                 transform: obj.rotation ? `rotate(${obj.rotation}deg)` : "",
-                transformOrigin: "center center"
+                transformOrigin: "center center",
+                // For the same reason as the colour and the font: a faded box that snapped
+                // to full strength the moment you double-clicked it would look like the
+                // edit had already changed something.
+                opacity: obj.opacity === undefined ? "" : String(obj.opacity)
             });
         }
 

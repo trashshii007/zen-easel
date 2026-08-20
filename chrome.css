@@ -168,3 +168,198 @@
 #tabbrowser-tabpanels[zen-easel-split-frozen] .browserSidebarContainer {
   overflow: hidden;
 }
+
+/* ------------------------------------------------------- floating card bar */
+
+/* The bar that fades in over a webcard's bottom edge while the pointer is on it: the
+ * favicon, the title, play/pause and open-link.
+ *
+ * It is here, in the browser window, rather than on the easel's canvas because a live
+ * card is a <browser> element above the easel's entire document — a control the page
+ * painted would be buried by the site it belongs to, which is exactly when you need it.
+ * Built and placed by modules-host/live-host.uc.js; hit-tested by the *page*, against the
+ * same rectangles it laid the bar out from, which is why nothing here takes the pointer.
+ *
+ * The wrapper carries position and rotation in layer coordinates. The bar inside it is
+ * laid out at the board's world size and scaled, so every number below is a world unit
+ * and stays in step with renderer.uc.js's CHROME_* constants. */
+/* display:block, because these are XUL boxes and the default -moz-box layout would try to
+ * size the bar for its parent. The bar is laid out at the board's world size and then
+ * scaled, so at any zoom below 100% it is deliberately *wider* than the wrapper that
+ * contains it — position:absolute takes it out of that negotiation entirely and leaves its
+ * own width and its transform as the only things deciding where it lands. */
+.zen-easel-card-chrome-wrapper {
+  display: block;
+  pointer-events: none;
+}
+
+.zen-easel-card-chrome {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  /* flex-end so the buttons stay against the right edge even when everything before them
+     has been dropped — a very narrow card is buttons and nothing else, and the geometry the
+     page hit-tests pins them right in that case too. */
+  justify-content: flex-end;
+  /* The row's gap and the bar's end padding are deliberately different numbers, and
+     webcardChromeRects uses them the same way: CHROME_GAP between items, CHROME_PAD only at
+     the two ends. */
+  gap: 6px;
+  padding: 0 8px;
+  box-sizing: border-box;
+  border-radius: 10px;
+  pointer-events: none;
+
+  /* The board's own colour at a heavier alpha — the same construction --easel-panel uses
+     for the easel's topbar and popups, so the bar reads as part of that system rather
+     than as a widget parked on top of a picture. The page sends the channels, because the
+     active board's tint lives in the easel document and this window cannot see it.
+     Deliberately a flat alpha and not backdrop-filter: Gecko does not reliably pull a
+     remote <browser>'s layer into a backdrop, so a blur would look right over a
+     screenshot and wrong over the live page it is supposed to match. */
+  --zen-easel-chrome-tint: 251, 251, 250;
+  --zen-easel-chrome-accent: var(--zen-primary-color, #2b5fd9);
+  background-color: rgba(var(--zen-easel-chrome-tint), 0.74);
+  border: 1px solid color-mix(in srgb, var(--zen-easel-chrome-accent) 26%, transparent);
+  /* Two layers: a tight contact shadow and a wide soft one, the pairing that makes the
+     easel's own floating panels read as resting on the board rather than as fog. */
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.10),
+    0 8px 24px rgba(0, 0, 0, 0.18);
+  color: rgba(0, 0, 0, 0.78);
+
+  opacity: 0;
+  transform-origin: 0 0;
+  transition: opacity 140ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Set one frame after the element is appended. A transition cannot run from a starting
+ * style the element was never rendered with, so setting it in the same tick would make
+ * the bar appear fully formed instead of fading in. */
+.zen-easel-card-chrome[data-visible] {
+  opacity: 1;
+}
+
+/* The ink follows the *board*, not the OS: an Ink board under a light system theme still
+ * needs light text on it. The easel's own chrome flips on the same signal, and the page
+ * hands it across with the tint. */
+.zen-easel-card-chrome[data-ink="dark"] {
+  color: rgba(255, 255, 255, 0.86);
+  background-color: rgba(var(--zen-easel-chrome-tint), 0.80);
+}
+
+/* margin-inline-end:auto keeps the icon against the left edge when the title has been
+ * dropped and there is no flexing item left to hold the buttons over to the right. Harmless
+ * when the title is present: auto margins only take space that the flex items did not, and
+ * the title takes all of it. */
+.zen-easel-card-chrome-favicon {
+  flex: none;
+  margin-inline-end: auto;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  object-fit: cover;
+  /* Shows through whenever there is no icon, or the icon fails to load. The disc is what
+     keeps the bar's layout from moving because a site has no favicon. */
+  background-color: color-mix(in srgb, var(--zen-easel-chrome-accent) 22%, transparent);
+}
+
+/* The XUL crop="end" attribute is set as well; these are here because it only truncates
+ * once the element is actually constrained, and a flex item defaults to min-width:auto —
+ * which is the intrinsic width of the whole title, so a long one would push the buttons
+ * off the end of the bar rather than being cut. */
+.zen-easel-card-chrome-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 12px;
+  font-weight: 500;
+  opacity: 0.92;
+}
+
+/* Spelled out rather than left to the UA sheet. Four things can be dropped from the row and
+ * in every case the survivors have to close the gap, because the page hit-tests against
+ * rectangles laid out on exactly these rules: a card with no link or no live geometry loses
+ * a button, and a card too narrow for the full row loses its title and then its icon. */
+.zen-easel-card-chrome-button[hidden],
+.zen-easel-card-chrome-favicon[hidden],
+.zen-easel-card-chrome-title[hidden] {
+  display: none;
+}
+
+.zen-easel-card-chrome-button {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background-color: color-mix(in srgb, var(--zen-easel-chrome-accent) 14%, transparent);
+  transition:
+    background-color 120ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 120ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* The glyph is a mask tinted with currentColor, not a background image.
+ *
+ * It was a background image with -moz-context-properties:fill, which does nothing here:
+ * context-fill only reaches an SVG that asks for it by name, and these paths carry no fill
+ * attribute at all — so they painted at the SVG default, black, in both themes. On an Ink
+ * board the bar is light text on a dark tint and the glyphs were black on dark.
+ *
+ * A mask has no such handshake. The colour is the element's own, so both glyph and label
+ * follow the [data-ink] rule above from one declaration, and the disc stays the button's
+ * background underneath. */
+.zen-easel-card-chrome-button::before {
+  content: "";
+  display: block;
+  width: 12px;
+  height: 12px;
+  background-color: currentColor;
+  mask-position: center;
+  mask-repeat: no-repeat;
+  mask-size: contain;
+}
+
+/* Driven by an attribute rather than :hover, because the bar takes no pointer events at
+ * all — the page owns the hit test and tells us which control the pointer found. */
+.zen-easel-card-chrome-button[data-hover] {
+  background-color: color-mix(in srgb, var(--zen-easel-chrome-accent) 30%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--zen-easel-chrome-accent) 45%, transparent),
+              0 0 12px color-mix(in srgb, var(--zen-easel-chrome-accent) 55%, transparent);
+}
+
+/* Glyphs swapped by attribute rather than by rebuilding a subtree on every frame the state
+ * could have changed. */
+.zen-easel-card-chrome-button.is-play[data-state="play"]::before {
+  mask-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12"><path d="M3.2 1.6 10 6l-6.8 4.4z"/></svg>');
+}
+
+.zen-easel-card-chrome-button.is-play[data-state="pause"]::before {
+  mask-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12"><path d="M3 1.8h2.2v8.4H3zm3.8 0H9v8.4H6.8z"/></svg>');
+  width: 11px;
+  height: 11px;
+}
+
+.zen-easel-card-chrome-button.is-link::before {
+  mask-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12"><path d="M4 1.6h6.4V8h-1.6V4.3L3.1 10 2 8.9l5.7-5.7H4z"/></svg>');
+}
+
+/* Only when muted, so a board where nobody has touched the setting looks exactly as it
+ * did — the ring is a state worth noticing, not a control worth advertising. */
+.zen-easel-card-chrome-button.is-play[data-muted] {
+  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--zen-easel-chrome-accent) 60%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .zen-easel-card-chrome,
+  .zen-easel-card-chrome-button {
+    transition: none;
+  }
+}

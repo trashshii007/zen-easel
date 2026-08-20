@@ -35,6 +35,69 @@
 (function () {
     if (window.ZenEaselLiveLayer) return;
 
+    // Everything the page draws that a live tile must not bury. One selector list rather
+    // than references handed over by each module, so a new panel is covered by adding a
+    // line here instead of by remembering to register itself.
+    //
+    // Anything not currently showing is `display: none` — the panels use [hidden], the
+    // floating strips use .is-visible — and measures as a zero rect, which is skipped. So
+    // the list needs no state in it.
+    //
+    // .easel-menu is deliberately absent: a context menu is already handled by
+    // suppressOverlapping, which hides the tile outright. That is the heavier treatment,
+    // but it is the proven one, and a menu is transient enough not to need this.
+    const CHROME_SELECTOR = [
+        ".easel-topbar",          // the strip itself, and the two panels that hang out of it
+        ".easel-list",
+        ".easel-live-panel",
+        ".easel-toolbar",         // and the style popup that opens above it
+        ".easel-popup",
+        ".easel-font-panel",
+        ".easel-text-controls",   // the strips that ride alongside a selected object
+        ".easel-shape-controls",
+        ".easel-error"
+    ].join(",");
+
+    const overlaps = (a, b) =>
+        a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+
+    // `rect` shrunk so it no longer meets `other`, or null when no shrink can do that
+    // without also losing area that only `rect` covers.
+    //
+    // The answer exists exactly when the intersection is a band across the whole of `rect`
+    // lying along one of its edges — which is the case a panel and the bar it hangs from
+    // produce. The band is already inside `other`'s hole, so giving it up changes nothing
+    // about the region the two cut out between them, and `rect` keeps its corner radius.
+    function trimAgainst(rect, other) {
+        const left = Math.max(rect.x, other.x);
+        const right = Math.min(rect.x + rect.w, other.x + other.w);
+        const top = Math.max(rect.y, other.y);
+        const bottom = Math.min(rect.y + rect.h, other.y + other.h);
+
+        if (left <= rect.x && right >= rect.x + rect.w) {
+            if (top <= rect.y) return { ...rect, y: bottom, h: rect.y + rect.h - bottom };
+            if (bottom >= rect.y + rect.h) return { ...rect, h: top - rect.y };
+        }
+        if (top <= rect.y && bottom >= rect.y + rect.h) {
+            if (left <= rect.x) return { ...rect, x: right, w: rect.x + rect.w - right };
+            if (right >= rect.x + rect.w) return { ...rect, w: left - rect.x };
+        }
+        return null;
+    }
+
+    // Square-cornered on purpose: the corners of a box drawn round two overlapping panels
+    // belong to neither of them, and rounding them would only make the shape look intended.
+    function boundingBox(a, b) {
+        const x = Math.min(a.x, b.x);
+        const y = Math.min(a.y, b.y);
+        return {
+            x, y,
+            w: Math.max(a.x + a.w, b.x + b.w) - x,
+            h: Math.max(a.y + a.h, b.y + b.h) - y,
+            r: 0
+        };
+    }
+
     const { safeExternalUrl } =
         ChromeUtils.importESModule("chrome://sine/content/zen-easel/background/validate.sys.mjs");
 
@@ -47,11 +110,23 @@
     // it passes over.
     const OFFSCREEN_PAINT_GRACE_MS = 750;
 
-    // Height of the title strip the canvas renderer draws at the bottom of a webcard, and of
-    // the URL strip it draws at the top of a web tile. Both in world units, and both owned by
-    // renderer.uc.js — the tile is inset so the canvas keeps drawing them.
-    const FOOTER_HEIGHT = 30;
-    const WEB_BROWSER_BAR = 28;
+    // Tiles used to be inset by a strip the canvas renderer drew — a webcard's title bar
+    // along its bottom, a web tile's URL bar across its top — because that strip carried the
+    // play/pause control and was the one part of the object a <browser> could not be allowed
+    // to cover. The control lives in a floating bar now, drawn as DOM *above* the live layer
+    // rather than beside it (see modules-host/live-host.uc.js), so there is nothing left for
+    // a tile to make room for and both types are laid out edge to edge.
+
+    // How long after a web tile goes live before its poster is taken.
+    //
+    // A poster written only when a tile is paused would never exist for the tiles that are
+    // never paused — the ones the idle sweep stops, or that a reload takes with it — which
+    // are exactly the cards you come back to expecting to see something. So one is taken
+    // shortly after the site settles, and refreshed on the way out when there is a chance.
+    //
+    // Long enough for a player to have drawn its poster frame and a page to have laid
+    // itself out; short enough that a tile stopped early still has one.
+    const POSTER_AFTER_LOAD_MS = 3000;
 
     class ZenEaselLiveLayer {
         constructor(host) {
@@ -86,6 +161,13 @@
             // visible in one place.
             this._revealTimer = null;
             this._resyncTimer = null;
+            // The chrome rectangles last sent to the host, as a signature string, and the
+            // corner radius of each element they were read from. See _syncChromeClip.
+            this._chromeClip = null;
+            this._chromeRadii = new WeakMap();
+            // Pending post-load poster captures, by object id, so a tile stopped before its
+            // timer fires does not snapshot a browser that has gone.
+            this._posterTimers = new Map();
         }
 
         get enabled() {
@@ -152,6 +234,11 @@
             const next = !!painting;
             if (this._hostPainting === next) return;
             this._hostPainting = next;
+            // The board has gone off screen — a tab switch, a splitter drag — and the
+            // pointer is somewhere else entirely by the time it comes back. The bar lives in
+            // the browser window and would otherwise still be there, in the position the
+            // board was last in, waiting for a hover that already ended.
+            if (!next) this.host.canvas.clearHover();
             this.host.canvas.invalidate();
         }
 
@@ -189,6 +276,135 @@
             // The renderer skips a live card's screenshot, so the static layer has to be
             // repainted for it to come back.
             if (changed) this.host.canvas.invalidate();
+        }
+
+        /* ------------------------------------------------------- chrome clip */
+
+        // The other half of the same problem suppressOverlapping solves, for the chrome
+        // that is always there rather than only while a menu is open.
+        //
+        // A live tile is a <browser> in the browser window, above this page's whole content
+        // area, so the toolbar and the topbar are drawn underneath it however this
+        // document's z-order is arranged. Hiding the tile — the menu's answer — is not an
+        // answer here: the toolbar never goes away, so a card that happened to sit over the
+        // bottom-left corner would simply stop being live.
+        //
+        // So the tile stays and the layer gets a hole cut in it instead. The host does the
+        // cutting; this side only measures, because these are its elements and it is the
+        // only side that knows when one of them appears.
+        //
+        // Public, because the paint loop is not the only thing that can change the answer.
+        // Painting here is on demand, and opening a popup or a dropdown moves nothing on the
+        // board — so a panel that appeared between two paints would sit under a tile until
+        // something else happened to schedule one. The few places that show or hide chrome
+        // call this directly; see easel-page's chromeChanged.
+        syncChromeClip() {
+            if (!this._easelId) return;
+            const rects = this._makeDisjoint(this._chromeRects());
+
+            // Compared before sending. This runs on every painted frame — the floating
+            // strips ride alongside a selected object, so their rects really do move with a
+            // pan — but the usual frame changes nothing, and rewriting the layer's clip-path
+            // re-clips every remote frame inside it.
+            const signature = rects.map(r => `${r.x},${r.y},${r.w},${r.h},${r.r}`).join("|");
+            if (signature === this._chromeClip) return;
+
+            // Remembered only once the host has somewhere to put it. A board's layer does
+            // not exist until its first tile mounts, and the page is measuring its chrome
+            // before that — caching a send the host dropped would leave the clip never
+            // applied, because the rects would go on matching for ever afterwards.
+            this._chromeClip = this.bridge?.liveClipChrome(this._easelId, rects) ? signature : null;
+        }
+
+        _chromeRects() {
+            const root = this.host.shadowRoot;
+            if (!root) return [];
+
+            const rects = [];
+            for (const element of root.querySelectorAll(CHROME_SELECTOR)) {
+                const box = element.getBoundingClientRect();
+                // A hidden panel measures 0×0. Nothing else needs to know it is hidden.
+                if (box.width < 1 || box.height < 1) continue;
+
+                // Rounded to whole pixels on each edge rather than by width and height, so
+                // the hole neither creeps outward nor eats into the chrome's own border —
+                // and so sub-pixel jitter during a pan does not churn the signature.
+                const x = Math.round(box.left);
+                const y = Math.round(box.top);
+                rects.push({
+                    x, y,
+                    w: Math.round(box.right) - x,
+                    h: Math.round(box.bottom) - y,
+                    r: this._cornerRadius(element)
+                });
+            }
+            return rects;
+        }
+
+        // Two holes that overlap cancel each other out. The host cuts them with the even-odd
+        // rule, under which a point inside two holes has crossed an odd number of edges and
+        // so counts as *inside* the shape again — the overlap comes back as painted layer,
+        // which on screen is a hairline of live website lying across whatever two pieces of
+        // chrome happen to meet there.
+        //
+        // One layout really does that: a panel hanging off the topbar. .easel-list and
+        // .easel-live-panel sit 34px below a button that is itself a few pixels down from
+        // the top of a 44px bar, so they begin two or three pixels above its lower edge.
+        //
+        // Rects are processed in document order, so the topbar is already in `out` by the
+        // time a panel of its own is looked at, and whatever came first is never moved.
+        _makeDisjoint(rects) {
+            if (rects.length < 2) return rects;
+
+            const out = [];
+            for (const rect of rects) {
+                let current = rect;
+                let again = true;
+                // The size test is a termination condition, not a tidiness one. A rect
+                // wholly inside another trims to zero height — it contributes nothing, which
+                // is the right answer — and a zero-height rect still reports as overlapping,
+                // because the overlap test is written for rectangles with area. Without this
+                // it would be handed back to trimAgainst unchanged, for ever, from inside
+                // the paint loop.
+                while (again && current.w > 0 && current.h > 0) {
+                    again = false;
+                    for (let i = 0; i < out.length; i++) {
+                        if (!overlaps(current, out[i])) continue;
+                        const trimmed = trimAgainst(current, out[i]);
+                        if (trimmed) {
+                            current = trimmed;
+                        } else {
+                            // Not a clean band, so there is no shrink that does not also
+                            // give up area the union needs. Merged into a bounding box
+                            // instead: that cuts out slightly more than the two panels
+                            // cover, which shows a little board around them — wrong-looking
+                            // but harmless, where a cancelled overlap shows a running
+                            // website on top of a control. No layout here produces this.
+                            current = boundingBox(current, out[i]);
+                            out.splice(i, 1);
+                        }
+                        // Either way `current` has changed shape, so the ones already
+                        // cleared have to be checked against it again.
+                        again = true;
+                        break;
+                    }
+                }
+                if (current.w > 0 && current.h > 0) out.push(current);
+            }
+            return out;
+        }
+
+        // Read once per element and remembered. getComputedStyle flushes style, and these
+        // are constants of the stylesheet — but a popup is a new element every time it
+        // opens, so this cannot be a lookup table keyed by class either.
+        _cornerRadius(element) {
+            let radius = this._chromeRadii.get(element);
+            if (radius === undefined) {
+                const value = parseFloat(window.getComputedStyle(element).borderTopLeftRadius);
+                radius = Number.isFinite(value) ? value : 0;
+                this._chromeRadii.set(element, radius);
+            }
+            return radius;
         }
 
         releaseSuppressed() {
@@ -272,7 +488,90 @@
                 obj.webcard.useLiveWebCard = false;
                 this.host.store.markDirty();
             }
+            // Before the unmount, and awaited by it: the pixels come from the tile's own
+            // <browser>, so there is nothing left to photograph once it is gone. A web tile
+            // has no screenshot behind it, so this is the only thing standing between a
+            // paused card and a blank panel with a URL on it.
+            //
+            // Not awaited by the caller — a menu item should not sit open while a snapshot
+            // encodes — so the unmount is chained rather than sequenced here.
+            if (obj && obj.type === "webBrowser" && this.isLive(obj.id)) {
+                // Cancelled up front rather than left to the _unmount below. A snapshot
+                // takes a frame or two to encode, and the post-load timer is free to fire
+                // inside that window — which is a second capture of the same tile, a
+                // second asset written, and whichever finishes last deciding the poster
+                // while the other is orphaned on disk until the sweep gets to it.
+                this._cancelPoster(obj.id);
+                this._capturePoster(obj.id).finally(() => this._unmount(obj.id));
+                return;
+            }
             this._unmount(obj.id);
+        }
+
+        /* ----------------------------------------------------------- poster */
+
+        // Writes the tile's current pixels as this web tile's poster, replacing whatever it
+        // had. Best-effort throughout: every failure leaves the card exactly as it was.
+        //
+        // Only webBrowser objects. A webcard already has a picture — the capture it was
+        // born from — and overwriting that with a later frame of the site would quietly
+        // rewrite the thing the user saved.
+        async _capturePoster(objectId) {
+            const obj = this.host.canvas._byId(objectId);
+            if (!obj || obj.type !== "webBrowser" || !this.bridge || !this._easelId) return;
+
+            let shot = null;
+            try {
+                shot = await this.bridge.liveSnapshotTile(this._easelId, objectId);
+            } catch (e) {
+                this.log("could not snapshot a tile:", e.message);
+            }
+            if (!shot || !shot.bytes || !shot.bytes.length) return;
+
+            // Re-read rather than trusting the object from before the await: a snapshot
+            // takes a frame or two to encode, and the card can be deleted or undone away
+            // inside that window. Writing to the stale reference would leave an asset on
+            // disk owned by nothing.
+            const still = this.host.canvas._byId(objectId);
+            if (!still || still.type !== "webBrowser") return;
+
+            let asset = "";
+            try {
+                asset = await this.host.store.saveAsset(shot.bytes, "png");
+            } catch (e) {
+                this.log("could not save a tile poster:", e.message);
+                return;
+            }
+            if (!asset) return;
+
+            const target = this.host.canvas._byId(objectId);
+            if (!target || target.type !== "webBrowser") return;
+
+            // Written straight onto the object rather than through a mutation. A poster is
+            // not an edit: it is a cache of what the card was showing, and putting it on
+            // the undo stack would mean Ctrl+Z stepping back through pictures rather than
+            // through the things the user actually did.
+            target.webBrowser.poster = asset;
+            this.host.store.markDirty();
+            this.host.canvas.invalidate();
+        }
+
+        // One poster shortly after a tile settles, so a card stopped by the idle sweep or
+        // by a reload still has something to show. Cancelled if the tile goes first.
+        _schedulePoster(objectId) {
+            this._cancelPoster(objectId);
+            const timer = window.setTimeout(() => {
+                this._posterTimers.delete(objectId);
+                if (this.isLive(objectId)) this._capturePoster(objectId);
+            }, POSTER_AFTER_LOAD_MS);
+            this._posterTimers.set(objectId, timer);
+        }
+
+        _cancelPoster(objectId) {
+            const timer = this._posterTimers.get(objectId);
+            if (timer === undefined) return;
+            window.clearTimeout(timer);
+            this._posterTimers.delete(objectId);
         }
 
         /* ---------------------------------------------------------- mounting */
@@ -318,11 +617,13 @@
             // The static canvas must stop painting the screenshot underneath, or it would
             // show through wherever the site is transparent.
             this.host.canvas.invalidate();
+            if (obj.type === "webBrowser") this._schedulePoster(obj.id);
             return true;
         }
 
         _unmount(objectId) {
             if (!this._tiles.has(objectId)) return;
+            this._cancelPoster(objectId);
             this._offscreenSince.delete(objectId);
             this._offscreen.delete(objectId);
             this._suppressed.delete(objectId);
@@ -367,7 +668,23 @@
         // Called from the canvas's paint, on the same frame as everything else, so tiles
         // never lag the board they are sitting on.
         sync() {
-            if (!this._tiles.size || !this._easelId) return;
+            if (!this._easelId) return;
+
+            // Before the tile count is checked, because the layer can be up with no tiles in
+            // it at all, carrying only the floating card bar — and that bar has to stay out
+            // from under the toolbar too.
+            //
+            // But only when there is a layer. Measuring costs a querySelectorAll and a
+            // getBoundingClientRect per piece of chrome, and the send is refused outright
+            // when the board has no layer to cut — which also means the signature cache
+            // never engages, so a board with nothing live on it would pay the full price on
+            // every frame of every pan and every pen stroke, for an answer that is dropped.
+            // The bar's own arrival is handled by the canvas, which calls in directly.
+            if (this._tiles.size || this.host.canvas?.isShowingCardChrome()) {
+                this.syncChromeClip();
+            }
+
+            if (!this._tiles.size) return;
 
             // A tile whose object is gone has to go with it. Done here rather than in
             // removeObjects because deletion is not the only way an object stops existing:
@@ -377,7 +694,7 @@
             this._sweepOrphans();
             if (!this._tiles.size) return;
 
-            const origin = this._viewportOrigin();
+            const origin = this.viewportOrigin();
             const width = this.host.canvas.renderer.width;
             const height = this.host.canvas.renderer.height;
             const now = Date.now();
@@ -432,7 +749,12 @@
         // observe. The topbar sits between the two, so without this every tile is drawn
         // that much too high — the canvas leaves its hole in the right place and the site
         // appears above it.
-        _viewportOrigin() {
+        //
+        // Public, because tiles are no longer the only thing placed in that layer: the
+        // floating card bar goes there too, and it is the same seam with the same trap on
+        // the other side of it. One definition, so a second reader cannot rediscover the
+        // topbar the hard way.
+        viewportOrigin() {
             try {
                 const rect = this.host.viewport.getBoundingClientRect();
                 return { x: rect.left, y: rect.top };
@@ -450,7 +772,7 @@
         //
         // The zoom is folded into scale rather than applied to a parent layer, because the
         // host's layer is shared with nothing and has no transform of its own.
-        _geometryFor(obj, viewportOrigin = this._viewportOrigin()) {
+        _geometryFor(obj, viewportOrigin = this.viewportOrigin()) {
             const view = this.host.canvas.view;
             const zoom = view.zoom;
             const local = this.host.canvas.toScreen(obj.x, obj.y);
@@ -461,29 +783,31 @@
             // so this costs nothing that the canvas is not already paying for the objects
             // around it.
             const rotation = obj.rotation || 0;
+            // Sent alongside the rotation and applied the same way: a live tile is a real
+            // element in the host's layer, so the renderer's globalAlpha reaches its
+            // screenshot but not the running site above it. Without this a faded card
+            // would snap back to full strength the moment it went live.
+            const opacity = obj.opacity === undefined ? 1 : obj.opacity;
 
             if (obj.type === "webBrowser") {
                 // Laid out at its own world size and scaled by the zoom, so zooming magnifies
                 // the page rather than reflowing it at every step.
-                const barHeight = Math.min(WEB_BROWSER_BAR, obj.h);
-                const contentW = obj.w;
-                const contentH = Math.max(obj.h - barHeight, 0);
                 return {
                     rect: {
                         x: origin.x,
-                        y: origin.y + barHeight * zoom,
+                        y: origin.y,
                         w: obj.w * zoom,
-                        h: contentH * zoom
+                        h: obj.h * zoom
                     },
-                    content: { w: contentW, h: contentH },
+                    content: { w: obj.w, h: obj.h },
                     offset: { x: 0, y: 0 },
                     scale: zoom,
                     rotation,
-                    // Where the object's centre is relative to the tile's own top-left.
-                    // The tile covers only part of the object — the URL strip and the
-                    // card footer stay canvas-drawn — so it must turn about the object's
-                    // centre rather than its own, or it would swing away from the frame.
-                    pivot: { x: obj.w * zoom / 2, y: (obj.h / 2 - barHeight) * zoom }
+                    opacity,
+                    // The tile is the whole object now, so its centre and the object's are
+                    // the same point. It used to be inset below a canvas-drawn URL strip and
+                    // had to turn about a centre that was not its own.
+                    pivot: { x: obj.w * zoom / 2, y: obj.h * zoom / 2 }
                 };
             }
 
@@ -491,23 +815,23 @@
             const frame = capture.frameRelativeToViewport;
             const size = capture.webContentSize;
 
-            // The tile covers the card's art area only, never the footer: the renderer still
-            // paints the title strip on the canvas below, and it doubles as the drag handle
-            // for a card whose middle now belongs to a website.
-            const artHeight = Math.max(obj.h - FOOTER_HEIGHT, 0);
+            // Edge to edge. The tile used to stop short of a canvas-drawn title strip along
+            // the card's bottom, which doubled as the drag handle for a card whose middle
+            // belonged to a website. Dragging still works without it: a tile only takes the
+            // pointer once it has been activated, so a press anywhere on a live-but-not-yet-
+            // clicked card reaches the board exactly as it always did.
             const scale = frame.w > 0 ? (obj.w * zoom) / frame.w : zoom;
 
             return {
-                rect: { x: origin.x, y: origin.y, w: obj.w * zoom, h: artHeight * zoom },
+                rect: { x: origin.x, y: origin.y, w: obj.w * zoom, h: obj.h * zoom },
                 content: { w: size.w, h: size.h },
                 // Post-scale, because the host applies this as a plain offset alongside the
                 // transform rather than inside it.
                 offset: { x: -frame.x * scale, y: -frame.y * scale },
                 scale,
                 rotation,
-                // The tile covers the art area only; the footer below it stays canvas-
-                // drawn. So the pivot is the whole card's centre expressed in the tile's
-                // coordinates, which is half the footer's height below the tile's own.
+                opacity,
+                // The tile is the whole card, so its centre and the card's coincide.
                 pivot: { x: obj.w * zoom / 2, y: obj.h * zoom / 2 }
             };
         }
@@ -564,12 +888,22 @@
             // Also refreshes the LRU: the card being used should be the last one evicted.
             // The order itself is the host's, because the cap is.
             this.bridge?.liveActivate(this._easelId, objectId);
+            // The tile has the pointer now, so the board will not hear it move again until
+            // it is handed back — and the hover bar would otherwise stay parked over a site
+            // that is being used. This is the whole of "interacting with a live tile hides
+            // the card": the state is dropped here, and the frame that follows stops asking
+            // the host to draw it.
+            this.host.canvas?.clearHover();
         }
 
         deactivate() {
             if (!this._activeId) return;
             this._activeId = null;
             this.bridge?.liveDeactivate();
+            // The pointer is back on the board and has not moved, so no event is coming to
+            // say what it is resting on. Almost always that is the card just stepped out of,
+            // whose bar should reappear rather than wait for a twitch of the mouse.
+            this.host.canvas?.refreshHover();
         }
 
         /* ---------------------------------------------------------- gestures */
@@ -652,6 +986,10 @@
                 this._resyncTimer = null;
             }
             this._cancelReveal();
+            // A pending poster is addressed to a tile on the board being left, and by the
+            // time it fired _easelId would name a different one.
+            for (const timer of this._posterTimers.values()) window.clearTimeout(timer);
+            this._posterTimers.clear();
             this._tiles.clear();
             this._offscreenSince.clear();
             this._offscreen.clear();
@@ -738,7 +1076,7 @@
         // Sync again over the next couple of frames.
         //
         // The geometry a tile is placed at is built from this page's own layout — see
-        // _viewportOrigin — and at the moment a tab becomes visible again that layout is
+        // viewportOrigin() — and at the moment a tab becomes visible again that layout is
         // still settling. One pass reads it mid-transition and places every tile at an
         // offset that is about to be wrong, and because the paint loop is dirty-driven
         // rather than continuous, on an idle board there is no second pass to correct it.

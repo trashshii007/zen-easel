@@ -128,7 +128,7 @@
         // invalidation for a number that changes a handful of times a session.
         updateLiveCount() {
             if (!this._census) return;
-            const total = (this.host.bridge?.liveCount(this.host.store.current?.id) ?? { total: 0 }).total;
+            const total = (this.host.bridge?.liveCount() ?? { total: 0 }).total;
             if (total === this._lastLiveCount) return;
             this._lastLiveCount = total;
 
@@ -165,6 +165,12 @@
         // both are closed — the switcher and the census share the handler, so whichever
         // closed last must not take the listener the other is still relying on.
         _syncOutsideListener() {
+            // Both dropdowns hang below the topbar and over the board, so either appearing
+            // or disappearing changes the holes cut in the live-tile layer. Called from here
+            // because all four of the open/close methods already end with this one — and
+            // before the early return below, which is about the listener, not the panels.
+            this.host.chromeChanged();
+
             const wanted = !!(this._open || this._censusOpen);
             if (wanted === this._outsideBound) return;
             this._outsideBound = wanted;
@@ -229,6 +235,9 @@
             }));
 
             this._censusPanel.replaceChildren(...children);
+            // Re-rendered whenever a card is stopped from inside it, which changes its
+            // height while it is open over the board.
+            this.host.chromeChanged();
         }
 
         _entryTitle(easelId) {
@@ -302,6 +311,9 @@
                 this._action("Rename this easel", () => this.renameCurrent()),
                 this._action("Delete this easel", () => this.deleteCurrent(), true)
             );
+            // Re-rendered a second time when the refreshed index arrives, which can change
+            // the panel's height under a live tile that is already showing through it.
+            this.host.chromeChanged();
         }
 
         _action(label, handler, danger = false) {

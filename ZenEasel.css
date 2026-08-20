@@ -575,6 +575,7 @@
 .easel-popup-swatches {
   display: grid;
   grid-template-columns: repeat(5, 22px);
+  justify-content: center;
   gap: 7px;
 }
 
@@ -626,6 +627,73 @@
   display: block;
   border-radius: 50%;
   background: var(--easel-text);
+}
+
+/* The opacity row. A slider rather than preset stops, because the value anyone actually
+   wants is "a bit fainter than that" — see _opacityRow in tools.uc.js. Separated from the
+   widths by the same rule the widths are separated from the swatches, so the popup reads
+   as three settings rather than one long list. */
+.easel-popup-opacity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px solid var(--easel-panel-border);
+}
+
+.easel-opacity-label {
+  font-size: 11px;
+  color: var(--easel-muted);
+}
+
+/* Tabular figures and a fixed width, so the popup does not twitch sideways as the
+   readout goes from 100% to 95% and back while the thumb is being dragged. */
+.easel-opacity-value {
+  min-width: 34px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: var(--easel-text);
+}
+
+/* Built from parts rather than left to the platform: the native range widget is styled
+   from the OS theme and ignores the panel it is sitting in, which reads as a piece of a
+   different application inside a popup that is otherwise all Arc. */
+.easel-opacity-slider {
+  flex: 1;
+  min-width: 88px;
+  height: 18px;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  appearance: none;
+  cursor: pointer;
+}
+
+.easel-opacity-slider::-moz-range-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--easel-panel-border);
+}
+
+.easel-opacity-slider::-moz-range-progress {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--easel-accent);
+}
+
+.easel-opacity-slider::-moz-range-thumb {
+  width: 13px;
+  height: 13px;
+  border: 2px solid var(--easel-solid);
+  border-radius: 50%;
+  background: var(--easel-accent);
+}
+
+.easel-opacity-slider:focus-visible { outline: none; }
+.easel-opacity-slider:focus-visible::-moz-range-thumb {
+  box-shadow: 0 0 0 3px var(--easel-accent-soft);
 }
 
 /* ------------------------------------------------------------ text controls */

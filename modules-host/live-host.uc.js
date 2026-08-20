@@ -28,7 +28,7 @@
     if (window.ZenEaselLiveHost) return;
 
     const { E10SUtils } = ChromeUtils.importESModule("resource://gre/modules/E10SUtils.sys.mjs");
-    const { safeExternalUrl } =
+    const { safeExternalUrl, safeFaviconUrl } =
         ChromeUtils.importESModule("chrome://sine/content/zen-easel/background/validate.sys.mjs");
 
     // Waiting for the content process to be handed over. Firefox's own nested browser
@@ -86,6 +86,33 @@
     // that is on screen but not repainting and so would never release it.
     const LAYER_SHRINK_SETTLE_MS = 400;
 
+    // The longest edge, in device pixels, of the poster written when a web tile stops.
+    // It is drawn at card size on a board and rewritten every time a tile is paused, so
+    // this is chosen to keep the file small rather than to keep the picture sharp.
+    const POSTER_MAX_EDGE = 900;
+
+    // The one URL shape this mod builds for itself, and the only load that needs a
+    // referrer. Matched tightly — the id alphabet and length are the same test
+    // objects.uc.js applies before it builds the URL — because this is what decides
+    // whether a Referer header is attached to a request.
+    const YOUTUBE_EMBED = /^https:\/\/www\.youtube\.com\/embed\/[A-Za-z0-9_-]{11}(?:[?#]|$)/;
+
+    // What a YouTube tile claims as its embedder.
+    //
+    // The /embed/ player refuses to configure itself without one: a request with no
+    // Referer comes back ERROR_CODE_EMBEDDER_IDENTITY_MISSING_REFERRER, which is the
+    // "Error 153 - Video player configuration error" a tile used to show instead of a
+    // video. A tile is a top-level document rather than an iframe, so nothing supplies
+    // that header on its own the way an embedding page would.
+    //
+    // localhost rather than a plausible-looking website, and that is the whole of the
+    // choice. The header names whoever is doing the embedding, so anything else would be
+    // this mod telling YouTube it is a site it is not; localhost says what is true, which
+    // is that a local application is asking. youtube.com itself is refused outright —
+    // ERROR_CODE_EMBEDDER_IDENTITY_DENIED — so passing the video's own page is not an
+    // option either.
+    const YOUTUBE_REFERRER = "http://localhost/";
+
     // Sites whose sticky headers land in the middle of a crop taken further down the page.
     // Arc ships a list like this; these are applied as agent sheets, which outrank page CSS
     // without an !important arms race.
@@ -94,6 +121,31 @@
         "div[class^=mobile-navbar-index__mobileNavbarWrapper]{padding-top:0px}",
         "div[class^=app-layout__header]{padding-top:0px}"
     ];
+
+    /* --------------------------------------------- floating card bar validators */
+
+    // The two colour strings the page sends for the bar, checked on arrival the way its
+    // geometry is. Both land in a stylesheet declaration in the browser window's own
+    // document, so both are shape-checked rather than taken at their word. The bar's third
+    // untrusted string is its favicon, which becomes an image load instead of a declaration
+    // and goes through validate.sys.mjs's safeFaviconUrl with the page's own sanitizer.
+
+    // "R, G, B". Substituted into rgba(), where anything else is either a declaration the
+    // parser drops or a url() the page had no business sending.
+    const CHANNELS = /^\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}$/;
+
+    // A colour, conservatively: a hex literal, a bare keyword, or one of the colour
+    // functions applied to numbers and keywords. Deliberately not a full CSS colour
+    // grammar — the point is to exclude the rest of the value space, not to be the parser
+    // that comes after it.
+    //
+    // The function name is an allowlist rather than a shape. `[a-z-]+\(...\)` reads like it
+    // rules out url(), and does not: every character of "url(//host/x.png)" is in the set a
+    // colour function's arguments are allowed to draw from, so the one construct this
+    // exists to keep out matched it. Naming the functions is the only version of this test
+    // that means what the paragraph above says.
+    const CSS_COLOR =
+        /^(#[0-9a-f]{3,8}|[a-z]+|(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color|color-mix|light-dark)\([a-z0-9\s,.%#/-]*\))$/i;
 
     class ZenEaselLiveHost {
         constructor() {
@@ -139,7 +191,14 @@
 
             this._orphanTimer = null;
             this._idleTimer = null;
+            this._widgetTimer = null;
             this._positionRaf = null;
+
+            // The floating card bar, or null. One per window: the page shows it for whatever
+            // the pointer is resting on, and there is one pointer. Holds the elements, the
+            // board it belongs to, and the last spec applied, so a frame that changes only
+            // the position does not rewrite the text and the icon.
+            this._chrome = null;
 
             // A Zen split divider is being dragged right now. See _watchSplitResize.
             this._splitResizing = false;
@@ -187,6 +246,11 @@
             board = {
                 easelId, layer, owner: null, resizeObserver: null,
                 visible: false, tabShowing: false,
+                // This board's layer is up only to carry the floating card bar — nothing is
+                // live on it. Kept apart from `visible`, which is the page's statement about
+                // its *tiles* and which the sweep reads to decide whether the layer can be
+                // reclaimed. See showChrome and _hideChrome.
+                chromeOnly: false,
                 // A splitter drag is in flight, so this board paints nothing; and, once it
                 // ends, it goes on painting nothing until its page has placed the tiles for
                 // the size the pane finished at. Both are reasons not to paint that have
@@ -203,7 +267,10 @@
                 // never painted.
                 notifiedPainting: null,
                 // When the rect last changed size, for the shrink settle. See _positionLayer.
-                shrinkAt: 0
+                shrinkAt: 0,
+                // The page's own chrome, as rectangles to be punched out of this layer.
+                // See clipChrome.
+                chromeClip: null
             };
             this._boards.set(easelId, board);
             return board;
@@ -275,7 +342,11 @@
             if (this._positionRaf) return;
             const tick = () => {
                 this._positionRaf = null;
-                if (this._destroyed || !this._tiles.size) return;
+                // A bar counts as a reason to keep going. It is shown for static cards too,
+                // so a board with nothing running still has a layer that has to follow the
+                // content area — without this the bar would stay where the window was when
+                // the pointer first landed on the card.
+                if (this._destroyed || (!this._tiles.size && !this._chromeShowing())) return;
                 let painting = false;
                 for (const board of this._boards.values()) {
                     if (!this._boardPainting(board)) continue;
@@ -371,15 +442,132 @@
             board.layer.style.top = `${rect.top}px`;
             board.layer.style.width = `${width}px`;
             board.layer.style.height = `${height}px`;
+            // The clip path's outer ring is the layer's own box, so a resize invalidates it
+            // even though the holes inside have not moved.
+            this._applyLayerClip(board);
+        }
+
+        /* ----------------------------------------------------------- chrome clip */
+
+        // The easel's toolbar, topbar and floating panels are drawn *inside* the page, and a
+        // live tile is a <browser> in the browser window sitting above that page's entire
+        // content area. So the tile buries them, and no z-index in the page can win: the two
+        // are not in the same stacking context, or even the same document.
+        //
+        // The menu path solves this by lowering the tile — suppressOverlapping hides any
+        // tile a context menu covers and the canvas paints the screenshot back. That works
+        // because a menu is transient. The toolbar and the topbar are not: hiding a tile for
+        // as long as it happens to sit near the bottom-left corner would mean live cards
+        // simply stop being live in a large part of the board.
+        //
+        // So instead of lowering the tile, a hole is cut in the layer where each piece of
+        // page chrome is. The pixels in a hole come from the page underneath, which is the
+        // chrome itself, drawn over the canvas exactly as it always was — the tile keeps
+        // running everywhere else, and nothing has to be hidden or repainted.
+        //
+        // `rects` are in the page's client coordinates. The layer is positioned exactly over
+        // that page's <browser>, so those are the layer's own coordinates too, with no
+        // conversion — the same identity the tile geometry already relies on.
+        // Returns whether there was a board to hold the answer. The page caches what it
+        // last sent, and a board's layer does not exist until its first tile mounts, so it
+        // has to be told when a send went nowhere.
+        clipChrome(easelId, rects) {
+            const board = this._boardFor(easelId);
+            if (!board) return false;
+            board.chromeClip = Array.isArray(rects) ? rects : null;
+            this._applyLayerClip(board);
+            return true;
+        }
+
+        _applyLayerClip(board) {
+            if (!board || !board.layer) return;
+
+            const size = board.lastRect;
+            const holes = board.chromeClip;
+            const finite = v => typeof v === "number" && Number.isFinite(v);
+
+            // No holes, or no layer to cut them out of. Clearing rather than writing an
+            // all-covering path: a layer with no clip at all is the cheaper state, and it is
+            // the one every board starts in.
+            if (!holes || !holes.length || !size || !(size.width > 0) || !(size.height > 0)) {
+                if (board.layer.style.clipPath) board.layer.style.clipPath = "";
+                return;
+            }
+
+            // The outer ring, then one subpath per hole. `evenodd` is what turns the inner
+            // subpaths into holes rather than into more filled area.
+            let path = `M0 0H${size.width}V${size.height}H0Z`;
+            let cut = 0;
+            for (const hole of holes) {
+                // Checked rather than coerced, like every other structured value crossing
+                // this seam: a NaN here would produce a path string the parser rejects
+                // outright, and a rejected clip-path is an unclipped layer — which is the
+                // bug this exists to fix, silently back again.
+                if (!hole || !finite(hole.x) || !finite(hole.y) ||
+                    !finite(hole.w) || !finite(hole.h)) continue;
+                if (hole.w <= 0 || hole.h <= 0) continue;
+                path += this._holeSubpath(hole);
+                cut++;
+            }
+
+            board.layer.style.clipPath = cut ? `path(evenodd, "${path}")` : "";
+
+            // A clip is part of a remote frame's position, and the widget layer is not told
+            // about it by the style change alone — the same reason a transform needs this.
+            for (const tile of this._tiles.values()) {
+                if (tile.easelId === board.easelId) this._scheduleWidgetUpdate(tile);
+            }
+        }
+
+        // One rounded rectangle as SVG path data. Rounded rather than square because the
+        // chrome is: a plain rect hole would leave a sliver of website showing in each of
+        // the toolbar's four corners, which is exactly where the eye goes.
+        _holeSubpath({ x, y, w, h, r }) {
+            const radius = Math.max(0, Math.min(
+                typeof r === "number" && Number.isFinite(r) ? r : 0,
+                w / 2, h / 2
+            ));
+            if (!radius) return `M${x} ${y}H${x + w}V${y + h}H${x}Z`;
+
+            const arc = `a${radius} ${radius} 0 0 1`;
+            return `M${x + radius} ${y}` +
+                `H${x + w - radius}${arc} ${radius} ${radius}` +
+                `V${y + h - radius}${arc} ${-radius} ${radius}` +
+                `H${x + radius}${arc} ${-radius} ${-radius}` +
+                `V${y + radius}${arc} ${radius} ${-radius}Z`;
         }
 
         // Every reason a board's layer might be down, in one place, because two callers
         // have to agree on the answer: the layer's own visibility and each tile's. They
         // disagreed while a splitter was being dragged, which is the sort of thing that
         // leaves a tile painting inside a layer that is supposed to be gone.
+        // chromeOnly is the "and nothing is live on it" case: a board showing the floating
+        // card bar over a static screenshot has no tiles at all, so nothing would ever have
+        // told it it was painting, and its layer would stay hidden with the bar inside it.
+        //
+        // The "nothing is live on it" half is load-bearing, not descriptive. A board with
+        // tiles has a page that speaks for them through `visible`, and hovering a card must
+        // not overrule it: coming back to a backgrounded tab leaves visible=false for the
+        // length of the reveal delay, and a bar shown in that window would put every tile up
+        // early, at the geometry it had when the tab was left — which is the frame of
+        // misplaced websites the delay exists to avoid. Worse, it oscillates: the bar going
+        // away flips the board back to not-painting, so each hover in and out toggles every
+        // tile on the board.
         _boardPainting(board) {
-            return !!board && board.visible && board.tabShowing &&
-                !board.resizing && !board.awaitingLayout;
+            if (!board) return false;
+            const wanted = board.visible ||
+                (board.chromeOnly && !this._hasTiles(board.easelId));
+            return wanted && board.tabShowing && !board.resizing && !board.awaitingLayout;
+        }
+
+        // _tilesOf builds an array, and this runs from the position loop once a frame per
+        // board. The question here is only whether there are any.
+        _hasTiles(easelId) {
+            if (!easelId) return false;
+            for (const tile of this._tiles.values()) {
+                if (tile.easelId === easelId) return true;
+            }
+            return false;
         }
 
         // One style write that guarantees a board paints nothing even if a per-tile call is
@@ -413,9 +601,306 @@
             }
         }
 
+        /* --------------------------------------------------- floating card bar */
+
+        // The bar the page wants shown, or null for none.
+        //
+        // It lives on this side because a live tile is a <browser> above the easel's whole
+        // document — anything the page painted for a running card would be buried by the
+        // site it belongs to. Clicks are still the page's: the bar is pointer-events:none
+        // throughout, and the canvas hit-tests the same rectangles it laid the bar out from.
+        //
+        // It rides inside the board's own layer, which already sits over the right tab and
+        // already clips, so a card panned off the board takes its bar with it rather than
+        // painting one over Zen's sidebar. A child element with a z-index above the tiles,
+        // rather than a later sibling: tiles are appended as cards go live, and a card made
+        // live while its bar was showing would otherwise mount straight over the control
+        // that had just been clicked.
+        showChrome(easelId, spec) {
+            if (!spec || !easelId || !this._validRect(spec.rect)) {
+                this._hideChrome();
+                return;
+            }
+
+            // A board with nothing live has no layer, and this is a legitimate reason to
+            // give it one — the bar is shown for a static card long before anything is
+            // running. _ensureBoard is idempotent, so a board that already has one is
+            // untouched.
+            const board = this._ensureBoard(easelId);
+            if (!board.owner || !board.owner.isConnected) {
+                this._setOwner(board, this._easelBrowserFor(easelId));
+            }
+            if (!board.owner) {
+                this._hideChrome();
+                return;
+            }
+
+            // A board that has never had a tile has never been told it is painting, and its
+            // layer is hidden by default. The page only asks for a bar when it is looking at
+            // the board, so the ask itself is the statement that it is on screen.
+            //
+            // A flag of its own rather than setting board.visible, which means something
+            // narrower — the page has declared its tiles are painting — and which the sweep
+            // reads to decide whether a board's layer can be reclaimed. Borrowing it here
+            // would strand an empty layer in the chrome document for every board that ever
+            // showed a bar.
+            if (!board.chromeOnly) {
+                board.chromeOnly = true;
+                board.tabShowing = this._isBoardTabShowing(easelId);
+                this._applyLayerVisibility(board);
+            }
+            this._positionLayer(board);
+            // The layer follows the content area from the rAF loop, which parks itself when
+            // nothing is live. A bar on a board with no tiles needs it running too, or it
+            // would stay where the window was when it first appeared.
+            this._startPositionLoop();
+
+            // Moving from one card straight to the next: rebuilt rather than repositioned,
+            // so the bar fades in on the card you are now pointing at instead of sliding
+            // across the board to meet it. Two cards side by side are the common case and
+            // a control that travels between them reads as a bug.
+            //
+            // Only within one board. A bar moving to a *different* board has to go out
+            // through _hideChrome, which is the half that also gives the old board's layer
+            // back — dropping the element alone would leave that board marked chromeOnly
+            // with an empty layer nothing later reclaims, because the sweep only runs when
+            // a tile goes away and such a board never had one.
+            if (this._chrome && this._chrome.applied &&
+                this._chrome.board === board &&
+                this._chrome.applied.objectId !== spec.objectId) {
+                this._dropChromeElement();
+            }
+
+            const chrome = this._ensureChrome(board);
+            if (!chrome) return;
+
+            this._applyChrome(chrome, spec);
+        }
+
+        _ensureChrome(board) {
+            if (this._chrome && this._chrome.board === board && this._chrome.wrapper.isConnected) {
+                return this._chrome;
+            }
+            this._hideChrome();
+
+            const doc = board.layer.ownerDocument;
+
+            // Two elements, the same split the tiles use. The wrapper carries the position
+            // and the rotation, in layer coordinates; the bar inside it is laid out at the
+            // board's *world* size and scaled, so its padding and type sizes are plain
+            // numbers rather than something that has to be recomputed per zoom level.
+            const wrapper = doc.createXULElement("box");
+            wrapper.className = "zen-easel-card-chrome-wrapper";
+            wrapper.style.position = "absolute";
+            wrapper.style.zIndex = "1";
+
+            const bar = doc.createXULElement("box");
+            bar.className = "zen-easel-card-chrome";
+            bar.style.transformOrigin = "0 0";
+
+            const favicon = doc.createElementNS("http://www.w3.org/1999/xhtml", "img");
+            favicon.className = "zen-easel-card-chrome-favicon";
+            // A missing or unloadable icon leaves the disc behind it, which is the point of
+            // having a disc — the bar's layout does not move because a site has no favicon.
+            favicon.addEventListener("error", () => { favicon.removeAttribute("src"); });
+
+            const label = doc.createXULElement("label");
+            label.className = "zen-easel-card-chrome-title";
+            label.setAttribute("crop", "end");
+
+            const play = this._chromeButton(doc, "play");
+            const link = this._chromeButton(doc, "link");
+
+            bar.append(favicon, label, play, link);
+            wrapper.appendChild(bar);
+            board.layer.appendChild(wrapper);
+
+            this._chrome = {
+                board, wrapper, bar, favicon, label, play, link,
+                // The content last written, so a frame that only moved the board does not
+                // rewrite a label; and whether the fade has been started.
+                applied: null, shown: false
+            };
+            return this._chrome;
+        }
+
+        // The bar's own box, checked the way _layoutTile checks a tile's. Geometry is the
+        // one structured value crossing this seam and it is the one that cannot be left to
+        // the CSSOM to reject: an absent rect throws in _applyChrome, and a NaN one is
+        // silently dropped by the style setter, which leaves the bar parked wherever it
+        // last was rather than over the card it now belongs to.
+        _validRect(rect) {
+            return !!rect && [rect.x, rect.y, rect.w, rect.h]
+                .every(v => typeof v === "number" && Number.isFinite(v));
+        }
+
+        _chromeButton(doc, kind) {
+            const button = doc.createXULElement("box");
+            button.className = `zen-easel-card-chrome-button is-${kind}`;
+            // The glyph is a background image in the stylesheet rather than markup, so the
+            // play/pause swap is one attribute write instead of rebuilding a subtree on
+            // every frame the state could have changed.
+            return button;
+        }
+
+        _applyChrome(chrome, spec) {
+            const wrapper = chrome.wrapper;
+            const rect = spec.rect;
+
+            wrapper.style.left = `${rect.x}px`;
+            wrapper.style.top = `${rect.y}px`;
+            wrapper.style.width = `${Math.max(0, rect.w)}px`;
+            wrapper.style.height = `${Math.max(0, rect.h)}px`;
+
+            const rotation = spec.rotation || 0;
+            if (rotation) {
+                const pivot = spec.pivot || { x: rect.w / 2, y: rect.h / 2 };
+                wrapper.style.transformOrigin = `${pivot.x}px ${pivot.y}px`;
+                wrapper.style.transform = `rotate(${rotation}deg)`;
+            } else if (wrapper.style.transform) {
+                wrapper.style.transform = "";
+                wrapper.style.transformOrigin = "";
+            }
+
+            const size = spec.size || { w: rect.w, h: rect.h };
+            chrome.bar.style.width = `${Math.max(0, size.w)}px`;
+            chrome.bar.style.height = `${Math.max(0, size.h)}px`;
+            chrome.bar.style.transform = `scale(${spec.scale || 1})`;
+
+            // The board's colour, so the bar follows a switch from Paper to Ink exactly as
+            // the easel's own panels do. Written every apply because they are three string
+            // compares in the style system and the alternative is tracking a fourth thing.
+            //
+            // Shape-checked on arrival, like the geometry above and for the same reason:
+            // these are strings from the page that land in a stylesheet declaration in the
+            // *browser window's* document. A custom property cannot escape its declaration,
+            // but it can carry a url() into one, and "the page is chrome too" is a property
+            // of today's arrangement rather than something this seam should assume.
+            const tint = CHANNELS.test(spec.tint || "") ? spec.tint : "";
+            const accent = CSS_COLOR.test(spec.accent || "") ? spec.accent : "";
+            if (tint) chrome.bar.style.setProperty("--zen-easel-chrome-tint", tint);
+            if (accent) chrome.bar.style.setProperty("--zen-easel-chrome-accent", accent);
+            // Only the two values the stylesheet actually keys on; anything else is the
+            // same as not having been told.
+            if (spec.ink === "light" || spec.ink === "dark") {
+                chrome.bar.setAttribute("data-ink", spec.ink);
+            } else {
+                chrome.bar.removeAttribute("data-ink");
+            }
+
+            // Everything below is content rather than geometry, and content changes on a
+            // hover or a play, not on a pan. Skipping it is what keeps a board being dragged
+            // from rewriting a label sixty times a second.
+            const applied = chrome.applied;
+            const same = applied &&
+                applied.objectId === spec.objectId &&
+                applied.title === spec.title &&
+                applied.favicon === spec.favicon &&
+                applied.state === spec.state &&
+                applied.muted === spec.muted &&
+                applied.canToggle === spec.canToggle &&
+                applied.url === spec.url &&
+                applied.showFavicon === spec.showFavicon &&
+                applied.showLabel === spec.showLabel &&
+                applied.hoverPart === spec.hoverPart;
+
+            if (!same) {
+                chrome.label.setAttribute("value", spec.title || "");
+                // Gated here as well as by objects.uc.js's normalize, because this is where
+                // it becomes a load: the bar is an <img> in the browser window, so a remote
+                // icon would have the chrome document fetch somebody's server every time a
+                // card came under the pointer. The page checks on the way out of storage;
+                // this is the check on the way in, and it is the one that matters. Both
+                // call the same gate — see validate.sys.mjs.
+                const favicon = safeFaviconUrl(spec.favicon);
+                if (favicon) chrome.favicon.setAttribute("src", favicon);
+                else chrome.favicon.removeAttribute("src");
+
+                // A narrow card sheds the title first and then the icon, keeping the
+                // buttons — see webcardChromeRects, which decided this and whose rectangles
+                // are what the page hit-tests. Packing the row any other way here would put
+                // the controls somewhere other than where the clicks are looked for.
+                chrome.favicon.toggleAttribute("hidden", !spec.showFavicon);
+                chrome.label.toggleAttribute("hidden", !spec.showLabel);
+
+                // toggleAttribute rather than .hidden: these are XUL boxes, where the
+                // attribute is the thing the style system reads.
+                chrome.play.toggleAttribute("hidden", !spec.canToggle);
+                chrome.play.setAttribute("data-state", spec.state || "play");
+                chrome.play.toggleAttribute("data-muted", !!spec.muted);
+                chrome.link.toggleAttribute("hidden", !spec.url);
+
+                chrome.play.toggleAttribute("data-hover", spec.hoverPart === "play");
+                chrome.link.toggleAttribute("data-hover", spec.hoverPart === "link");
+
+                chrome.applied = {
+                    objectId: spec.objectId, title: spec.title, favicon: spec.favicon,
+                    state: spec.state, muted: spec.muted, canToggle: spec.canToggle,
+                    url: spec.url, hoverPart: spec.hoverPart,
+                    showFavicon: spec.showFavicon, showLabel: spec.showLabel
+                };
+            }
+
+            // Last, and on a separate frame from the insert: the fade is a CSS transition,
+            // and a transition cannot run from a starting style the element has never been
+            // rendered with. Setting this in the same tick it was appended makes it appear
+            // fully formed instead of fading in.
+            if (!chrome.shown) {
+                chrome.shown = true;
+                const bar = chrome.bar;
+                window.requestAnimationFrame(() => {
+                    if (this._chrome && this._chrome.bar === bar) {
+                        bar.toggleAttribute("data-visible", true);
+                    }
+                });
+            }
+        }
+
+        // Whether a bar is up. Consulted by the position loop and by the board sweep, both
+        // of which would otherwise reclaim the layer out from under it.
+        _chromeShowing() {
+            return !!(this._chrome && this._chrome.wrapper.isConnected);
+        }
+
+        // The elements only. Split from _hideChrome because two callers must *not* trigger
+        // the board reclamation below: moving the bar from one card to the next, which is
+        // about to build another one in the same layer, and _teardownBoard, whose layer is
+        // going anyway and which would otherwise re-enter itself.
+        _dropChromeElement() {
+            if (!this._chrome) return;
+            // Removed outright rather than faded: the page takes the bar down when the
+            // pointer has already left the card, so there is nothing left for a fade-out to
+            // track, and an element still in the layer is one more thing the sweep has to
+            // reason about.
+            try { this._chrome.wrapper.remove(); } catch (e) { }
+            this._chrome = null;
+        }
+
+        _hideChrome() {
+            if (!this._chrome) return;
+            const board = this._chrome.board;
+            this._dropChromeElement();
+
+            // A board whose only reason to have a layer was the bar gives it back now. The
+            // tile sweep cannot do it — it runs when a tile goes away, and this board never
+            // had one.
+            if (board && board.chromeOnly) {
+                board.chromeOnly = false;
+                if (!board.visible && !this._hasTiles(board.easelId)) {
+                    this._teardownBoard(board.easelId);
+                } else {
+                    this._applyLayerVisibility(board);
+                }
+            }
+        }
+
         _teardownBoard(easelId) {
             const board = this._boards.get(easelId);
             if (!board) return;
+            // The bar is a child of this layer and about to be removed with it; dropping the
+            // record here is what keeps _chromeShowing from claiming a layer that is gone.
+            // The element alone — the reclamation half of _hideChrome is this method.
+            if (this._chrome && this._chrome.board === board) this._dropChromeElement();
             if (board.resizeObserver) {
                 try { board.resizeObserver.disconnect(); } catch (e) { }
             }
@@ -596,7 +1081,7 @@
             // flags can be stale at exactly this moment, and when they are, _applyTileState
             // below hides the very tile the click asked for while the page goes on believing
             // it is painting: the canvas leaves its hole, nothing fills it, and you get a
-            // blank card with a pause badge and no way back but pausing and playing again.
+            // blank card with a stuck bar and no way back but pausing and playing again.
             //
             // The way in is the one-time consent prompt. confirmEx is modal, so the page
             // takes a visibilitychange and calls background() while it is up, and the mount
@@ -727,10 +1212,15 @@
             this._watchLoad(tile, spec);
 
             try {
-                browser.fixupAndLoadURIString(spec, {
+                const load = {
                     // Deliberately not the system principal.
                     triggeringPrincipal: Services.scriptSecurityManager.createNullPrincipal({})
-                });
+                };
+                // Left off entirely unless the URL is one that needs it, so the property is
+                // absent rather than null for every other tile.
+                const referrerInfo = this._referrerInfoFor(spec);
+                if (referrerInfo) load.referrerInfo = referrerInfo;
+                browser.fixupAndLoadURIString(spec, load);
             } catch (e) {
                 this.log("a live tile refused to load:", e.message);
                 this.unmount(objectId);
@@ -945,6 +1435,78 @@
             return browser;
         }
 
+        /* ------------------------------------------------------------- poster */
+
+        // A tile's current pixels as PNG bytes, or null.
+        //
+        // What a web tile shows when it is not running. A webcard has a screenshot to fall
+        // back on because it was born from one; a web tile is a window onto a site and has
+        // never had anything, so it fell back to a blank panel with a URL on it. This is
+        // where the missing picture comes from — the tile's own output, so no request is
+        // made for it and nothing is fetched that the user did not already choose to load.
+        //
+        // drawSnapshot is the same privileged path capture-host uses for a region capture,
+        // asked here for the whole document rather than a crop of it.
+        async snapshotTile(easelId, objectId) {
+            const tile = this._tileFor(easelId, objectId);
+            if (!tile || !tile.browser) return null;
+
+            const windowGlobal = tile.browser.browsingContext &&
+                tile.browser.browsingContext.currentWindowGlobal;
+            if (!windowGlobal) return null;
+
+            let bitmap = null;
+            try {
+                // Capped rather than taken at devicePixelRatio. A poster is drawn at the
+                // card's size on a board, so resolution beyond a couple of hundred logical
+                // pixels an edge is bytes on disk nobody sees — and this is written on
+                // every pause, unlike a capture which happens once.
+                const rect = tile.browser.getBoundingClientRect();
+                if (!(rect.width >= 1) || !(rect.height >= 1)) return null;
+                const scale = Math.min(window.devicePixelRatio || 1,
+                    POSTER_MAX_EDGE / Math.max(rect.width, rect.height));
+
+                bitmap = await windowGlobal.drawSnapshot(null, Math.max(scale, 0.1), "rgb(255,255,255)");
+                if (!bitmap) return null;
+
+                const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+                canvas.getContext("2d").drawImage(bitmap, 0, 0);
+                const blob = await canvas.convertToBlob({ type: "image/png" });
+                return { bytes: new Uint8Array(await blob.arrayBuffer()) };
+            } catch (e) {
+                // A page that refuses to be drawn is not an error worth surfacing: the
+                // tile keeps working and the card falls back to the panel it drew before.
+                this.log("a tile refused to be snapshotted:", e.message);
+                return null;
+            } finally {
+                if (bitmap) { try { bitmap.close(); } catch (e) { } }
+            }
+        }
+
+        // The referrer a tile's load should carry, or null for the ordinary case of none.
+        //
+        // Deliberately per-URL rather than a blanket header on every tile: a referrer is a
+        // statement about where a request came from, and the honest answer for a tile the
+        // user pointed at an arbitrary site is that it came from nowhere. Only the embed
+        // player asks the question, so only the embed player is answered.
+        //
+        // A failure here degrades to the load this method did not exist for, which is a
+        // tile that shows YouTube's own error rather than no tile at all.
+        _referrerInfoFor(spec) {
+            if (!YOUTUBE_EMBED.test(spec)) return null;
+            try {
+                const info = Cc["@mozilla.org/referrer-info;1"].createInstance(Ci.nsIReferrerInfo);
+                // UNSAFE_URL so the header survives regardless of how the two schemes
+                // compare. There is nothing in the URI to leak: it is a bare origin, and a
+                // constant one.
+                info.init(Ci.nsIReferrerInfo.UNSAFE_URL, true, Services.io.newURI(YOUTUBE_REFERRER));
+                return info;
+            } catch (e) {
+                this.log("could not build a referrer for a tile:", e.message);
+                return null;
+            }
+        }
+
         // A tab's activity is managed by tabbrowser; a tile's is managed by nobody, so it
         // starts *inactive* — which throttles rAF and timers and stops its layers being
         // rendered at all. A largely static page still paints and looks fine. An SPA never
@@ -966,7 +1528,7 @@
             const tile = this._tileFor(easelId, objectId);
             if (!tile || !geometry) return;
 
-            const { rect, content, offset, scale, rotation, pivot } = geometry;
+            const { rect, content, offset, scale, rotation, pivot, opacity } = geometry;
 
             // Everything else crossing this seam is a plain number or string, and is treated
             // as untrusted on arrival. Geometry is the one structured value, and it was
@@ -986,15 +1548,23 @@
             tile.wrapper.style.height = `${Math.max(0, rect.h)}px`;
 
             // The card is rotated on the board, so its tile turns with it — about the
-            // *object's* centre, which the page sends as a pivot because the tile covers
-            // only the card's art and not its title strip. Turning about the tile's own
-            // centre would swing the website out of the frame the canvas drew for it.
+            // *object's* centre, which the page sends as a pivot. The tile covers the whole
+            // card now, so the two centres coincide; the pivot is still taken from the page
+            // rather than assumed, because it is the page that decides the tile's inset.
             if (rotation && finite(rotation) && pivot && finite(pivot.x) && finite(pivot.y)) {
                 tile.wrapper.style.transformOrigin = `${pivot.x}px ${pivot.y}px`;
                 tile.wrapper.style.transform = `rotate(${rotation}deg)`;
             } else if (tile.wrapper.style.transform) {
                 tile.wrapper.style.transform = "";
                 tile.wrapper.style.transformOrigin = "";
+            }
+
+            // Checked like every other number crossing this seam, and left alone entirely
+            // when it is absent — a page that predates this still lays its tiles out here.
+            if (finite(opacity) && opacity < 1) {
+                tile.wrapper.style.opacity = String(Math.max(0, opacity));
+            } else if (tile.wrapper.style.opacity) {
+                tile.wrapper.style.opacity = "";
             }
 
             tile.clip.style.transform = `scale(${scale})`;
@@ -1146,6 +1716,22 @@
                 tile.hidden = false;
                 this._applyTileState(tile);
             }
+
+            // Activation is a page-owned fact for exactly the same reason, and it is the one
+            // the loop above used to miss. _forgetAll clears the page's _activeId alongside
+            // its offscreen and suppressed sets, so an attaching page has no memory of the
+            // tile this side is still holding the pointer for — and the guard in the page's
+            // deactivate() is `if (!this._activeId) return`, so clicking the board never
+            // sends the message that would release it. The tile keeps pointerEvents:auto
+            // for good: it swallows the clicks that would fix it, and the hover bar flickers
+            // because every move over it leaves the canvas instead of reaching it. The only
+            // way out was clicking a *different* live tile, whose activate() displaces it.
+            //
+            // Same shape as detach()'s, and scoped the same way: _activeId is one per window,
+            // so a tile on some other board is not this attach's business.
+            const active = this._activeId && this._tiles.get(this._activeId);
+            if (active && active.easelId === easelId) this.deactivate();
+
             this._applyLayerVisibility(board);
             this._positionLayer(board);
             this._startPositionLoop();
@@ -1320,16 +1906,12 @@
             if (this._tileFor(easelId, objectId)) this.unmount(objectId);
         }
 
-        // What the census in a board's topbar reports. The window total matters more than
-        // the board's: the off-board tiles are exactly the ones with no reachable badge.
-        // Every easel tab shows the same total, which is the point — whichever board you
-        // happen to be looking at can account for everything the window is running.
-        count(easelId = null) {
-            let board = 0;
-            for (const tile of this._tiles.values()) {
-                if (easelId && tile.easelId === easelId) board++;
-            }
-            return { total: this._tiles.size, board };
+        // What the census in a board's topbar reports: the window total, deliberately, and
+        // not this board's. The off-board tiles are exactly the ones with no reachable bar,
+        // so every easel tab shows the same number — whichever board you happen to be
+        // looking at can account for everything the window is running.
+        count() {
+            return { total: this._tiles.size };
         }
 
         // Everything running in this window, for the census popup. Plain data, and it
@@ -1342,8 +1924,7 @@
                     objectId: tile.objectId,
                     easelId: tile.easelId,
                     url: tile.url,
-                    onThisBoard: !!easelId && tile.easelId === easelId,
-                    painting: !!tile.painting
+                    onThisBoard: !!easelId && tile.easelId === easelId
                 });
             }
             return out;
@@ -1548,13 +2129,18 @@
             // A board's layer goes when its last tile does, but only if no page is still
             // attached to it — an attached board is about to be given more tiles, and
             // recreating the layer would be churn for nothing.
+            //
+            // A board showing the floating bar is attached by definition — the page is
+            // looking at it and the pointer is on one of its cards — so it keeps its layer
+            // for the same reason, and it is the layer the bar is parented to.
             const board = this._boardFor(easelId);
-            if (board && !board.visible && !this._tilesOf(easelId).length) {
+            if (board && !board.visible && !this._hasTiles(easelId) &&
+                !(this._chrome && this._chrome.board === board)) {
                 this._teardownBoard(easelId);
             }
             if (!this._tiles.size) {
                 this._stopIdleSweep();
-                this._stopPositionLoop();
+                if (!this._chromeShowing()) this._stopPositionLoop();
             }
         }
 
@@ -1641,6 +2227,7 @@
             if (this._orphanTimer) window.clearTimeout(this._orphanTimer);
             this._stopIdleSweep();
             this._stopPositionLoop();
+            this._hideChrome();
             this.unmountAll();
         }
     }

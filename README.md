@@ -12,7 +12,7 @@ Requires [Sine](https://github.com/CosmoCreeper/Sine). In Sine's settings, enabl
 installing from unofficial sources, paste this repository's URL into the GitHub install
 field, and restart Zen.
 
-Requires the forked [Zen Libary](https://github.com/trashshii007/Zen-Library). 
+Requires the forked [Zen Library](https://github.com/trashshii007/Zen-Library).
 
 ## Opening a board
 
@@ -83,9 +83,28 @@ work, always keeping three window-heights of room below the lowest object.
 | New text box | text tool | `T` |
 | Edit text | double-click a box | `Ctrl`+`Enter` commits |
 | Context menu | right-click | `Menu` key |
+| Lock / unlock | right-click → **Lock** | — |
 
 `Escape` steps out of a live card, then cancels a drag, then returns to the select tool,
 then clears the selection.
+
+## Locking
+
+**Lock** on an object's right-click menu pins it to the board. The pointer passes
+straight through a locked object: no halo when you hover it, no selection, no drag,
+resize or rotate, no double-click to edit, and a marquee, `Ctrl`+`A` and `Tab` all step
+over it. Keyboard edits cannot reach one either, because nothing that is locked is ever
+selected.
+
+Right-click is the way back. It is the one thing that still finds a locked object, and
+its menu says **Unlock**. While it is locked that menu acts on the object you clicked
+rather than on the selection, so Duplicate, Copy, the reordering pair and Delete all
+still do what they say.
+
+A locked live card or web tile will not go live on a click and will not take the pointer;
+locking one that is already running hands the pointer back. A copy of a locked object —
+duplicated or pasted — arrives unlocked, since it lands selected and is meant to be moved
+into place.
 
 ## Colour
 
@@ -94,6 +113,15 @@ canvas right-click menu. Number keys `1`–`9` and `0` pick the first ten direct
 
 A swatch recolours the selection and sets the default for the next mark. Stroke widths
 beside the swatches work the same way, on shapes and ink.
+
+## Opacity
+
+The slider under the swatches fades whatever is selected, from 100% down to 10%, and
+sets the default for the next mark — so the toolbar's dot always previews the mark you
+are about to make. It applies to everything on a board: shapes, ink, text, images and
+animated GIFs, captures and web tiles. A live tile fades along with its screenshot, so
+pressing **▶** on a faded card does not snap it back to full strength. The whole drag is
+one undo step.
 
 Pen strokes thin as the pen speeds up and follow stylus pressure. Set
 `zen.easel.ink-style` to `uniform` for a constant width.
@@ -117,23 +145,42 @@ font. See [fonts/LICENSE.md](fonts/LICENSE.md).
 
 <img width="345" height="432" alt="image" src="https://github.com/user-attachments/assets/62ae3da4-3c34-4201-929c-254c74699397" />
 
-Right-click empty canvas for nine background swatches, saved per board. **Arc** is the
-default; **Follow theme** tracks Zen between light and dark; **Transparent** declines to
-tint at all. Every board is a tint rather than a fill, and the toolbar, popups and menus
+Right-click empty canvas for nine background swatches, saved per board. **Follow theme**
+is the default and tracks Zen between light and dark, so a new easel arrives matching the
+browser; **Arc** is the pale multi-colour wash; **Transparent** declines to tint at all. Every board is a tint rather than a fill, and the toolbar, popups and menus
 take the active board's colour.
 
 ## Live web cards and web tiles
 
 <img width="918" height="544" alt="image" src="https://github.com/user-attachments/assets/da62dfe2-dd5f-43ca-9569-1cc34c2b468d" />
 
-Press **▶** in a capture's title strip and the pixels are replaced by the real page,
-cropped to the region you captured. Press **❚❚** to go back to the screenshot. Click a
-live card once and the pointer belongs to the page inside it; `Escape` hands it back.
-Right-click always gets the easel's menu, and the title strip doubles as the drag handle.
+Point at a capture and a bar fades in over its bottom edge — the site's icon and title,
+**▶**, and **↗** to open the source page in a tab. Press **▶** and the pixels are replaced
+by the real page, cropped to the region you captured; **❚❚** goes back to the screenshot.
+A card you are not pointing at is just the picture, edge to edge.
+
+The toolbar, the topbar and their panels stay on top of a live card. They are drawn inside
+the page and a tile is a browser element above it, so they cannot simply be raised — a hole
+is cut in the tile layer where each of them is instead.
+
+Click a live card once and the pointer belongs to the page inside it; `Escape` hands it
+back. Right-click always gets the easel's menu.
+
+**The bar is the card's handle.** Drag it and the card moves, without the press being
+taken as the click that hands the pointer to the site — so a running card can be
+rearranged without stopping it first. Everywhere else on a live card still means "let me
+use the page". A card too small to carry a bar has none to grab: pause it from the
+right-click menu and it drags like anything else.
 
 **Web tiles** are the real site from the start — right-click empty canvas → **Add a web
 tile…**. Unlike live cards they scroll, text in them can be selected, and forms submit.
 YouTube links dropped or pasted become 16:9 embed players.
+
+A web tile has no screenshot behind it, so it keeps its own: a few seconds after it
+loads, and again whenever you stop it, the tile's current frame is saved as the card's
+picture. A stopped tile shows that rather than a blank panel — a video keeps its poster
+frame — with a strip along the bottom saying it is not running. Nothing is downloaded for
+this; the picture is the tile's own output.
 
 Once a card is live it **stays running**. Scrolling it off the board, switching to another
 easel, switching tabs and minimising the window all stop it *painting*, not running — so a

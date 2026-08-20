@@ -269,7 +269,15 @@ class EaselStoreImpl {
             id, title, createdAt: now, updatedAt: now,
             // Arc's EaselPalette, stored on the document rather than as a preference.
             palette: "vibrant",
-            background: "arc",
+            // These two are the page's DEFAULT_BACKGROUND and DEFAULT_CANVAS_MODE
+            // (modules/objects.uc.js), repeated as literals because this is a
+            // per-process background module and that one is per window. "theme" is the
+            // board with no colour of its own, so a new easel comes up matching Zen's
+            // light or dark scheme; "verticallyScrolling" is the board that fits the
+            // window rather than the fixed 3600-unit sheet. Written explicitly rather
+            // than left out so a new document reads the same as an established one.
+            background: "theme",
+            canvasMode: "verticallyScrolling",
             viewport: { panX: 0, panY: 0, zoom: 1 },
             objects: []
         };
@@ -494,10 +502,16 @@ class EaselStoreImpl {
             return;
         }
 
+        // Every field anywhere in the document that names a file in this directory. A
+        // field missing from this list is not a leak — it is the opposite, and worse: the
+        // sweep would see a file nothing claims and delete something still in use.
         const used = new Set();
         for (const obj of objects) {
             if (obj && obj.image && obj.image.asset) used.add(obj.image.asset);
             if (obj && obj.webcard && obj.webcard.asset) used.add(obj.webcard.asset);
+            // A web tile's poster. Rewritten every time a tile is stopped, so the ones it
+            // replaces are exactly what this sweep is for — but only the ones it replaces.
+            if (obj && obj.webBrowser && obj.webBrowser.poster) used.add(obj.webBrowser.poster);
         }
 
         const cutoff = Date.now() - ASSET_GRACE_MS;

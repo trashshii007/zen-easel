@@ -97,11 +97,15 @@
             const w = obj.w * view.zoom;
             const h = obj.h * view.zoom;
             const rotation = obj.rotation || 0;
+            // A GIF is the one object the canvas never paints, so the renderer's
+            // globalAlpha does not reach it. The compositor fades the element instead,
+            // which is the same result for free.
+            const opacity = obj.opacity === undefined ? 1 : obj.opacity;
 
             // Compared before writing: this runs on every painted frame, and assigning
-            // five style properties per image per frame is a style invalidation for
+            // six style properties per image per frame is a style invalidation for
             // values that only change when the board moves.
-            const signature = `${topLeft.x}|${topLeft.y}|${w}|${h}|${rotation}`;
+            const signature = `${topLeft.x}|${topLeft.y}|${w}|${h}|${rotation}|${opacity}`;
             if (signature === item.signature) return;
             item.signature = signature;
 
@@ -111,6 +115,7 @@
             style.width = `${Math.max(0, w)}px`;
             style.height = `${Math.max(0, h)}px`;
             style.transform = rotation ? `rotate(${rotation}deg)` : "";
+            style.opacity = opacity < 1 ? String(opacity) : "";
         }
 
         _remove(id) {

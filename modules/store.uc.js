@@ -171,9 +171,15 @@
                 // Any string — including one pointing at an object that has since been
                 // deleted — means the question has already been settled for this easel.
                 titleObjectId: typeof raw.titleObjectId === "string" ? raw.titleObjectId : undefined,
-                // Arc's CanvasMode. Anything unrecognised is the fixed page this mod has
-                // always drawn, so an unknown value can never leave a board unopenable.
-                canvasMode: raw.canvasMode === "verticallyScrolling" ? "verticallyScrolling" : "fixed",
+                // Arc's CanvasMode. Only the two known values survive, so a hand-edited
+                // or half-written field can never leave a board unopenable — anything
+                // else, including a board saved before the field existed, opens on the
+                // default. A board explicitly saved as "fixed" keeps its fixed page.
+                canvasMode: raw.canvasMode === "fixed"
+                    ? "fixed"
+                    : raw.canvasMode === "verticallyScrolling"
+                        ? "verticallyScrolling"
+                        : Objects.DEFAULT_CANVAS_MODE,
                 lastLaidOutAtCanvasWidth:
                     typeof raw.lastLaidOutAtCanvasWidth === "number" &&
                     raw.lastLaidOutAtCanvasWidth > 0 ? raw.lastLaidOutAtCanvasWidth : null,
@@ -274,10 +280,10 @@
                 // has no key at all on disk — which is exactly the state _hydrate reads
                 // back as "give this one a heading".
                 titleObjectId: doc.titleObjectId,
-                canvasMode: doc.canvasMode || "fixed",
+                canvasMode: doc.canvasMode || window.ZenEaselObjects.DEFAULT_CANVAS_MODE,
                 lastLaidOutAtCanvasWidth: doc.lastLaidOutAtCanvasWidth || null,
                 documentHeightAsFactorOfWidth: doc.documentHeightAsFactorOfWidth || null,
-                background: doc.background || "arc",
+                background: doc.background || window.ZenEaselObjects.DEFAULT_BACKGROUND,
                 viewport: doc.viewport,
                 objects: doc.objects
             }), {

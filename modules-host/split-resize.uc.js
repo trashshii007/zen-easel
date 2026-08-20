@@ -285,7 +285,7 @@
         // tracks. Not treated as a release: nothing is applied.
         _onLostCapture(event) {
             if (!this._drag || event.pointerId !== this._drag.pointerId) return;
-            if (!this._drag.releasing) this._endDrag();
+            this._endDrag();
         }
 
         _onKeyDown(event) {
@@ -299,9 +299,9 @@
         _endDrag() {
             const drag = this._drag;
             if (!drag) return;
-            // Read by _onLostCapture, which releasePointerCapture below is about to fire.
-            // Without it the release would re-enter this on its way out.
-            drag.releasing = true;
+            // Cleared first, and that is what keeps the releasePointerCapture below from
+            // re-entering here through the lostpointercapture it fires: _onLostCapture
+            // returns on a null drag.
             this._drag = null;
 
             const target = drag.target || document;
