@@ -42,7 +42,8 @@
         "live.allow-http": ["bool", false],
         "live.container": ["int", 0],
         "split-resize": ["str", "ghost"],
-        "live.private": ["bool", false]
+        "live.private": ["bool", false],
+        "capture-backdrop": ["str", "auto"]
     };
 
     const prefs = Object.create(null);

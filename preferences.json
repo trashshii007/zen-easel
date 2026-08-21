@@ -91,6 +91,38 @@
 
   {
     "type": "separator",
+    "label": "Capture backdrop — applies live",
+    "margin": "20px 0 10px 0"
+  },
+  {
+    "type": "text",
+    "label": "Zen makes the content view transparent, so a page whose own background has been made transparent — which is what the Zen Internet extension does per site — is really being read against your Zen window. A screenshot has no window behind it, and every screenshot path in Firefox composites onto white, so light text on a dark window comes out blown out and half-erased. This puts the colour that was behind the page into the picture instead. It applies to Zen's own screenshots as well as to Zen Easel's, and it never touches the page or the extension.",
+    "size": "12px",
+    "margin": "0 0 8px 0"
+  },
+  {
+    "type": "dropdown",
+    "property": "zen.easel.capture-backdrop",
+    "label": "What goes behind a captured page. Off is Firefox's white, exactly as before.",
+    "defaultValue": "auto",
+    "options": [
+      { "value": "auto", "label": "Your window's colour, on transparent tabs" },
+      { "value": "always", "label": "Your window's colour, always" },
+      { "value": "page", "label": "Plain white or near-black, by your light/dark setting" },
+      { "value": "custom", "label": "A colour of your own (below)" },
+      { "value": "off", "label": "Off — Firefox's white" }
+    ]
+  },
+  {
+    "type": "string",
+    "property": "zen.easel.capture-backdrop-color",
+    "label": "The colour used by Custom above. Any CSS colour — #1b1b1b, rgb(27 27 27), or rgba(0,0,0,0.5) if you actually want a see-through screenshot. Ignored in every other mode.",
+    "defaultValue": "",
+    "placeholder": "#1b1b1b"
+  },
+
+  {
+    "type": "separator",
     "label": "Live web cards",
     "margin": "20px 0 10px 0"
   },

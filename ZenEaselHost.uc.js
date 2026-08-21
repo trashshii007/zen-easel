@@ -25,6 +25,7 @@
     const MODULES = [
         ["ZenEaselUtil", "modules/util.uc.js"],
         ["ZenEaselCaptureHost", "modules-host/capture-host.uc.js"],
+        ["ZenEaselCaptureBackdrop", "modules-host/capture-backdrop.uc.js"],
         ["ZenEaselScreenshotHook", "modules-host/screenshot-hook.uc.js"],
         ["ZenEaselSplitResize", "modules-host/split-resize.uc.js"],
         ["ZenEaselLiveHost", "modules-host/live-host.uc.js"]
@@ -93,6 +94,17 @@
                 // the usual case when taking a screenshot.
                 this.screenshotHook = new window.ZenEaselScreenshotHook(this);
                 this.screenshotHook.init();
+
+                // Puts the colour that was actually behind the page into a capture,
+                // instead of the white every screenshot path composites onto. Isolated
+                // and pref-gated — zen.easel.capture-backdrop = off restores Firefox's
+                // behaviour exactly, on both this mod's captures and Zen's own. Published
+                // on the window because the process-global hook it installs looks the
+                // colour up from the browser's own window at capture time; see the header
+                // of background/capture-backdrop.sys.mjs.
+                this.backdrop = new window.ZenEaselCaptureBackdrop();
+                window.gZenEaselCaptureBackdrop = this.backdrop;
+                this.backdrop.install();
 
                 // Not an easel feature, and meant to be removable: it stops any about:
                 // page in a split pane flickering while the divider is dragged. Behind the
@@ -306,6 +318,8 @@
             // The <link rel="icon"> in the page should cover this, but setting it here as
             // well is free and removes a class of "why is my tab showing a globe" that
             // depends on favicon principal checks going our way.
+            // Both routes point at the one icon file, which strokes itself with
+            // context-fill for the reason set out in its own header.
             try {
                 gBrowser.setIcon(tab, BASE + "resources/zen-easel.svg");
             } catch (e) { }
@@ -600,6 +614,16 @@
             if (this.screenshotHook) {
                 this.screenshotHook.destroy();
                 this.screenshotHook = null;
+            }
+            // Only this window's half goes away. The screenshot hook it installed is
+            // shared with every other window and stays — it is inert without a window to
+            // ask for a colour. See destroy() in capture-backdrop.uc.js.
+            if (this.backdrop) {
+                try { this.backdrop.destroy(); } catch (e) { }
+                if (window.gZenEaselCaptureBackdrop === this.backdrop) {
+                    delete window.gZenEaselCaptureBackdrop;
+                }
+                this.backdrop = null;
             }
             // Drops the splitter listener and unpins anything a drag left frozen, so a
             // reload mid-gesture cannot strand a pane at the size it was frozen at.

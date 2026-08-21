@@ -589,6 +589,118 @@ layer twenty times a second for as long as a GIF was on screen. Exports and libr
 thumbnails still go through the canvas and get the first frame, which is what a still
 should be.
 
+### The capture backdrop
+
+Screenshots taken in Zen with a transparency extension running come out blown out and
+half-erased. It is worth spelling out why, because nothing about it is a bug and none of
+the three parts is doing anything wrong.
+
+1. **Zen makes the content view transparent.** With
+   `browser.tabs.allow_transparent_browser` set, `tabbrowser.js` puts `transparent="true"`
+   on every `<browser>`. That tells Gecko not to paint the default white canvas behind a
+   page. What shows through instead is the Zen window.
+2. **A styling extension makes the page's background transparent** so that window is
+   visible. [Zen Internet](https://github.com/sameerasw/zeninternet) — the one this was
+   written for — stores per-site "Transparency" features that are literally
+   `html, body, #root, #app, nav, … { background-color: transparent !important;
+   background-image: none }`, injected as a `<style>` element at the end of `<head>` and
+   re-anchored there by a `MutationObserver`.
+3. **Every screenshot path composites onto white.** In Firefox's `ScreenshotsUtils`,
+   `createCanvas` does `context.fillStyle = "rgb(255,255,255)"` and then asks
+   `drawSnapshot(rect, dpr, "rgb(255,255,255)")` for the pixels.
+
+A snapshot has no browser window behind it — nothing is there at all. So the light text you
+read comfortably over a dark Zen window lands on pure white and half of it disappears. It
+is also why **Move to easel** from the preview dialog looks the same: that image was
+already taken by Zen through `createCanvas` before this mod ever saw it.
+
+#### What is done about it
+
+The colour that was actually behind the page is put into the picture, by changing the one
+argument that decides it — `drawSnapshot`'s third.
+
+The page is never touched. An earlier attempt at this made the page opaque for the length
+of the shot with a user-agent-origin sheet, because the extension's rules are author
+`!important` and only UA or user `!important` outranks them without a specificity fight.
+That works, but it means an IPC round trip into the content process, a visible change to a
+live page, and a restore path that must survive a capture that throws — three ways to
+leave a page altered because a screenshot went wrong. Substituting the colour needs none of
+it: nothing in the content process is asked to do anything, the extension is left alone,
+and if every part of this fails the result is exactly the white you get today.
+
+Two paths, one answer:
+
+- **Zen Easel's own captures.** `capture-host.uc.js` passes the colour to `drawSnapshot`
+  instead of white, and retries once on white if Gecko refuses it — a backdrop must never
+  be the reason a capture fails.
+- **Zen's native screenshots.** `background/capture-backdrop.sys.mjs` wraps
+  `ScreenshotsUtils.createCanvas`, which is the single funnel for all four outputs (save
+  visible page, save full page, copy region, download region) and is reached internally as
+  `this.createCanvas`, so replacing the property covers every one. It shadows
+  `drawSnapshot` on that one tab's `WindowGlobalParent` with a function that substitutes
+  the colour for as long as that tab has a capture in flight — and only where the caller
+  passed the exact literal `"rgb(255,255,255)"`, so a future Gecko that starts asking for a
+  deliberate colour of its own gets to keep it.
+
+That hook lives in a background module rather than in a window script for a specific
+reason. `ScreenshotsUtils` is an ESM singleton, so patching it is process-global, while
+window scripts are per-window and are nuked when their window closes. A patch installed
+from window A that still referenced A's functions would start throwing "can't access dead
+object" the moment A was closed — and the only symptom would be that screenshots quietly
+broke in every *other* window. So it holds no window reference at all: at capture time it
+looks up `browser.ownerGlobal.gZenEaselCaptureBackdrop`, asks it for a colour, uses the
+string, and drops it. A window with no Zen Easel host loaded simply has no opinion.
+
+Which window global has a capture in flight is kept in a `WeakMap` rather than a single
+slot, so two windows screenshotting at once do not take each other's backdrop away, and the
+shim is installed once and left in place instead of being put up and taken down around each
+capture — with no entry in that map it hands straight through, which removes every way one
+capture ending could disturb another still running.
+
+#### Where the colour comes from
+
+`resolve()` in `capture-backdrop.uc.js`, and it is all reads:
+
+1. Zen's own `--zen-main-browser-background`, which is what `.zen-browser-generic-background`
+   paints behind the content area and is defined on `:root` including the private-window and
+   unsynced-window variants.
+2. Failing that — a theme using a gradient, or a translucent mica surface — a walk up the
+   chrome from the `<browser>` to the first thing that paints something opaque, checking
+   `::after` and `::before` too, because Zen paints the window background on pseudo-elements
+   rather than on the boxes themselves.
+3. Failing that, the plain `Canvas` system colour for whichever scheme the window is in.
+
+Anything translucent along the way is skipped rather than used: a translucent layer means
+what is under it is still part of what you were looking at. And a translucent *result* is
+rejected outright, because a PNG with an alpha channel looks blown out again the moment it
+is viewed on white, which is the whole complaint. `custom` is the one exception — if you
+type `rgba(0,0,0,0.5)` you get it.
+
+Resolution goes through one hidden, zero-sized, out-of-flow probe element, made once per
+window and kept: `var()`, `light-dark()`, `color-mix()` and system colours all need the
+window's own style system to resolve, and that is also what validates the custom pref —
+a value Gecko refuses leaves the declaration at `transparent`, which is rejected along with
+everything else that would not cover white. Keeping the probe rather than adding and
+removing one per capture means no DOM mutation that Zen's own observers would see.
+
+#### Settings
+
+`zen.easel.capture-backdrop`: `auto` (default — the window's colour, on tabs Zen has made
+transparent), `always`, `page` (plain white or near-black by your light/dark setting),
+`custom`, `off`. `zen.easel.capture-backdrop-color` holds the colour for `custom`.
+
+`off` restores Firefox's white on both paths exactly. An opaque page is unaffected in every
+mode, because it paints over the backdrop completely; and in the default configuration the
+colour applied equals the one already showing through, so there is nothing to see either
+way. `zen.easel.debug` logs which of the three sources `auto` got its answer from.
+
+One gap is left on the native path. `createCanvas` also fills its `OffscreenCanvas` with
+`rgb(255,255,255)` before it draws, to cover the device-pixel rows that rounding leaves the
+renderer short of, and that fill is inside the function being wrapped. On a fractional
+`devicePixelRatio` a dark backdrop can therefore still leave a white hairline at the right
+or bottom edge. Reaching it would mean reimplementing `createCanvas` rather than wrapping
+it, which is a much worse trade than a hairline.
+
 ### Exporting
 
 Right-click empty canvas for **Export as PNG…** or **Export as JPEG…**, or press
@@ -685,6 +797,8 @@ In Zen's mod preferences, or directly in `about:config`:
 | `zen.easel.grid` | `dots` | `none`, `dots` or `lines` |
 | `zen.easel.snap` | `guides` | `guides` (to other objects), `grid`, or `none`. Hold `Alt` to suppress |
 | `zen.easel.grid-size` | `24` | canvas pixels, for `snap: grid` |
+| `zen.easel.capture-backdrop` | `auto` | what goes behind a captured page: `auto`, `always`, `page`, `custom`, `off` |
+| `zen.easel.capture-backdrop-color` | *(empty)* | CSS colour for `custom` |
 | `zen.easel.live.enabled` | `true` | off means no easel ever loads a website |
 | `zen.easel.live.max-tiles` | `12` | how many cards may be live at once, per window; `0` for no cap |
 | `zen.easel.live.idle-timeout-min` | `30` | stop a card after this long out of sight; `0` for never |
@@ -717,6 +831,7 @@ window still open.
 | `background/actors.sys.mjs` | what the two window actors are, and how to install them |
 | `background/store.sys.mjs` | owns the disk: index, write queue, shutdown blocker, asset sweep |
 | `background/validate.sys.mjs` | the URL/id/asset-name rules, shared by everything |
+| `background/capture-backdrop.sys.mjs` | hooks `ScreenshotsUtils.createCanvas` so Zen's own screenshots composite onto the window's colour instead of white |
 
 **In the browser window** — the parts that genuinely cannot live in a page.
 
@@ -725,6 +840,7 @@ window still open.
 | `ZenEaselHost.uc.js` | toolbar button, shortcut, opening/focusing the easel tab, the bridge |
 | `modules-host/capture-host.uc.js` | region picker over Zen's chrome, `drawSnapshot` |
 | `modules-host/screenshot-hook.uc.js` | "Move to easel" inside Zen's screenshot preview |
+| `modules-host/capture-backdrop.uc.js` | works out what colour was behind the page, for both capture paths |
 | `modules-host/live-host.uc.js` | the live tiles themselves — `<browser>` elements, the layer over the easel tab, load watching |
 | `modules-host/split-resize.uc.js` | not an easel feature: fixes a Zen split-divider bug where mouse events from an in-process about: page arrive in that page's coordinates, so the divider snaps and the panes strobe. Behind a setting, and meant to be deleted once Zen fixes it upstream |
 

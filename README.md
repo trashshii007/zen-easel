@@ -39,6 +39,52 @@ The screenshot panel also offers **Whole window to easel**. *New easel…* start
 board from the capture. Captures keep their source URL — double-click a card to go back
 to the page it came from.
 
+## Blown-out screenshots, and the capture backdrop
+
+If you use a styling extension that makes sites transparent — [Zen
+Internet](https://github.com/sameerasw/zeninternet) is the one this was written for —
+screenshots come out looking washed out and half-erased. Three ordinary things line up:
+
+1. Zen makes the content view transparent. With `browser.tabs.allow_transparent_browser`
+   set, every `<browser>` gets `transparent="true"`, which tells Gecko not to paint the
+   default white canvas behind a page. What shows through instead is your Zen window.
+2. The extension makes the page's own background transparent so that window is visible —
+   its per-site Transparency rules are literally
+   `html, body, #root, … { background-color: transparent !important }`.
+3. Every screenshot path composites onto **white**. Firefox's `ScreenshotsUtils.createCanvas`
+   fills the canvas with `rgb(255,255,255)` and asks `drawSnapshot` for the pixels with the
+   same colour behind them.
+
+A snapshot has no browser window behind it — nothing is there at all. So light text that
+reads perfectly over a dark Zen window lands on pure white. Nothing is broken; the page is
+being composited against something other than what you were looking at.
+
+Zen Easel puts the colour that *was* behind the page into the picture, by changing that one
+argument. It covers Zen's own screenshots — visible page, full page, copy region, download
+region — as well as Zen Easel's captures and **Move to easel**. The page is never touched:
+no stylesheet is injected, nothing is asked of the content process, and the extension is
+left alone, so there is no flash and nothing to restore afterwards.
+
+`zen.easel.capture-backdrop` picks what goes behind:
+
+| Value | |
+|---|---|
+| `auto` *(default)* | your window's colour, on tabs Zen has made transparent |
+| `always` | your window's colour, whatever the tab is |
+| `page` | plain white or near-black, by your light/dark setting |
+| `custom` | `zen.easel.capture-backdrop-color`, exactly as typed |
+| `off` | Firefox's white — the feature becomes a no-op |
+
+`auto` reads Zen's own `--zen-main-browser-background`; if that is a gradient or a
+translucent mica surface it walks up the chrome from the `<browser>` to the first thing
+that paints something opaque, and falls back to your scheme's plain surface colour. An
+opaque page is unaffected in every mode — it paints over the backdrop completely — and in
+the default configuration the colour applied is the one already showing through, so there
+is nothing to notice either way.
+
+If a shot still looks wrong, `custom` with your own colour is the escape hatch, and
+`zen.easel.debug` logs where `auto` got its answer from.
+
 ## Tools
 
 <img width="538" height="245" alt="image" src="https://github.com/user-attachments/assets/191ee337-df59-435f-b2a0-cb1b66ddc2b7" />
@@ -247,6 +293,8 @@ In Zen's mod preferences, or `about:config`:
 | `zen.easel.grid` | `dots` | `none`, `dots` or `lines` |
 | `zen.easel.snap` | `guides` | `guides`, `grid`, or `none`. Hold `Alt` to suppress |
 | `zen.easel.grid-size` | `24` | canvas pixels, for `snap: grid` |
+| `zen.easel.capture-backdrop` | `auto` | what goes behind a captured page: `auto`, `always`, `page`, `custom`, `off` |
+| `zen.easel.capture-backdrop-color` | *(empty)* | CSS colour for `custom` |
 | `zen.easel.live.enabled` | `true` | off means no easel ever loads a website |
 | `zen.easel.live.max-tiles` | `12` | how many cards may be live at once; `0` for no cap |
 | `zen.easel.live.idle-timeout-min` | `30` | stop a card after this long out of sight; `0` for never |

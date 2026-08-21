@@ -8,11 +8,12 @@
 
 #zen-easel-button .toolbarbutton-icon {
   list-style-image: url("chrome://sine/content/zen-easel/resources/zen-easel.svg");
-  /* Without -moz-context-properties the SVG's context-stroke resolves to nothing and
-     the icon renders invisible. This is what lets one file work in both themes. */
-  -moz-context-properties: fill, stroke, fill-opacity;
+  /* The icon strokes itself with context-fill, so `fill` is the property that colours
+     it here, just as it is in the tab strip -- which is what lets one file serve every
+     surface and both themes. Without -moz-context-properties it resolves to nothing and
+     the icon renders invisible. */
+  -moz-context-properties: fill, fill-opacity;
   fill: currentColor;
-  stroke: currentColor;
   opacity: 0.7;
 }
 

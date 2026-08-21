@@ -23,6 +23,10 @@
     // highlight does not lag behind the cursor.
     const PREVIEW_INTERVAL_MS = 60;
 
+    // What Firefox composites a snapshot onto, and what this falls back to whenever the
+    // capture backdrop has nothing to say.
+    const WHITE = "rgb(255,255,255)";
+
     class ZenEaselCaptureHost {
         constructor() {
             this.log = window.ZenEaselUtil.log;
@@ -259,11 +263,33 @@
             // at a zoomed-in page; the true scale is measured off the result below.
             const scale = (window.devicePixelRatio || 1) * (browser.fullZoom || 1);
 
+            // What goes behind the page. Firefox always says white here, which erases a
+            // page Zen is showing through — see capture-backdrop.uc.js. Null means the
+            // feature is off or has no opinion, and white is then exactly what Firefox
+            // would have done.
+            let backdrop = null;
+            try {
+                backdrop = window.gZenEaselCaptureBackdrop
+                    ? window.gZenEaselCaptureBackdrop.resolve(browser) : null;
+            } catch (e) {
+                console.error("[zen-easel] could not resolve a capture backdrop:", e);
+            }
+
             let bitmap;
             try {
-                bitmap = await windowGlobal.drawSnapshot(null, scale, "rgb(255,255,255)");
+                bitmap = await windowGlobal.drawSnapshot(null, scale, backdrop || WHITE);
             } catch (e) {
-                throw new Error("this page refused to be captured");
+                // A backdrop Gecko will not parse must not be the reason a capture fails.
+                // Retried once on white before giving up, so the worst this feature can do
+                // to a capture is leave it looking the way it does today.
+                if (!backdrop) throw new Error("this page refused to be captured");
+                console.warn("[zen-easel] the capture backdrop was refused, " +
+                    "retrying on white:", e);
+                try {
+                    bitmap = await windowGlobal.drawSnapshot(null, scale, WHITE);
+                } catch (e2) {
+                    throw new Error("this page refused to be captured");
+                }
             }
             if (!bitmap) throw new Error("nothing was rendered to capture");
 
