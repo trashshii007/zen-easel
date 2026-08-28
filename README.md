@@ -38,7 +38,7 @@ Each board opens in its own tab.
 
 ## Capturing
 
-<img width="396" height="186" alt="image" src="https://github.com/user-attachments/assets/5afb6da3-0d11-464d-b8b3-0bb99021feaf" />
+<img width="633" height="499" alt="capture" src="https://github.com/user-attachments/assets/69999480-ac3b-40c3-8e37-0487f1c2a9a9" />
 
 Drag a region first, then choose where it goes.
 
