@@ -1,0 +1,28 @@
+<!--
+  Zen Easel's product mark, on every surface but the toolbar button: the easel's own tab
+  (page/easel.xhtml and the setIcon call in ZenEaselHost.uc.js), the rows and the "Easel"
+  button in Zen's screenshot UI (screenshot-hook.uc.js), and the region bar, which redraws
+  this markup inline because a content document cannot load chrome://sine
+  (actors/ZenEaselScreenshotChild.sys.mjs).
+
+  The line is stroked with `context-fill`, not `context-stroke`, and that is the whole
+  reason one file can serve all of them. The tab strip declares
+  `-moz-context-properties: fill, stroke` and then only ever sets `fill`
+  (browser/skin/classic/browser/tabbrowser/tabs.css); menu.css sets only `fill` on
+  `menu, menuitem`. So `stroke` keeps its initial value of `none`, and a context-stroke
+  icon loads, takes up its 16px and paints nothing at all — which reads as a tab with no
+  icon rather than as a broken one.
+
+  Painting strokes with the context's *fill* colour is Zen's own convention for line
+  icons; see the files in chrome/browser/skin/classic/browser/zen-icons that do exactly
+  this, down to the round caps. 9/128 is the same stroke ratio zen-easel.svg's 1.4/20 is,
+  so this sits at the same weight as the Copy and Download glyphs beside it.
+
+  The white plate the drawing arrived with went with the hardcoded ink — a plate can only
+  be one colour, and the whole point of context-fill is that this is not.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128"
+     fill="none" stroke="context-fill" stroke-opacity="context-fill-opacity"
+     stroke-width="9" stroke-linecap="round">
+  <path d="M90.2992 23.2896C107.674 41.5313 103.743 47.03 94.4594 43.3343C85.176 39.6387 71.6962 26.8147 62.3622 31.1417C53.0282 35.4688 108.075 83.802 88.4082 87.2058C80.9549 88.4958 39.7619 39.3475 25.6266 43.3343C10.8767 47.4946 60.7995 83.802 63.8251 106.872"/>
+</svg>

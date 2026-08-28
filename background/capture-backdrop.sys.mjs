@@ -23,11 +23,12 @@
 //
 // What this does about it
 // -----------------------
-// It puts the colour that was actually behind the page into the picture, by changing the
-// one argument that decides it. The page is never touched: no stylesheet is injected, no
-// extension is disabled, nothing in the content process is asked to do anything. If this
-// file does nothing at all, the result is exactly today's white — that is the failure
-// mode, by construction.
+// It puts the colour that was actually behind the page into the picture, by taking over
+// createCanvas and passing that colour in the two places it hardcodes white — the fill that
+// backs the canvas, and the background handed to drawSnapshot. The page is never touched:
+// no stylesheet is injected, no extension is disabled, nothing in the content process is
+// asked to do anything. Every failure path falls back to calling Firefox's own createCanvas,
+// so the worst this file can do is produce exactly the white it was written to replace.
 //
 // Why this is a background module rather than a window script
 // ----------------------------------------------------------
@@ -45,22 +46,10 @@
 const SCREENSHOTS_UTILS =
     "moz-src:///browser/components/screenshots/ScreenshotsUtils.sys.mjs";
 
-// The exact literal Firefox's createCanvas passes for the snapshot background. Matched on
-// rather than replaced blindly, so that if a future Gecko starts passing a deliberate
-// colour of its own — a print preview, a dark-mode canvas — that colour is left alone and
-// only the "no opinion, use white" case is answered.
-const FIREFOX_WHITE = "rgb(255,255,255)";
-
-// Which window globals have a capture in flight, and what colour each one wants. Keyed by
-// the window global rather than held in a single slot, so two windows screenshotting at
-// the same moment each get their own answer instead of the later one taking the earlier
-// one's backdrop away. Weak because a tab can navigate or close mid-capture, and a stray
-// entry must not be what keeps a dead window global alive.
-const active = new WeakMap();
-
-// The gated prototype patch below is installed at most once and then left in place. See
-// shimPrototype for why it is not put up and taken down per capture.
-let prototypePatched = false;
+// The largest rect drawSnapshot will render in one call, so a capture bigger than this is
+// taken in tiles. Same value as ScreenshotsUtils' own MAX_SNAPSHOT_DIMENSION, kept as a
+// literal rather than imported so a rename in a Zen update cannot break the hook.
+const MAX_SNAPSHOT_DIMENSION = 1024;
 
 /* --------------------------------------------------------------------- install */
 
@@ -87,65 +76,136 @@ export function installScreenshotBackdrop() {
         return false;
     }
 
-    if (ScreenshotsUtils._zenEaselBackdrop) return true;
-
-    const original = ScreenshotsUtils.createCanvas;
+    // Restore-then-repatch, rather than returning early when the marker is already set.
+    //
+    // The early return was the one path through this function that did nothing and still
+    // reported success, which is exactly the shape of a bug that cannot be found from the
+    // outside: the caller logs "hooked: true" and every screenshot still comes out white.
+    // It also made the module impossible to fix in place — a patch installed by an earlier
+    // revision owned the property for the rest of the session, and the only code that could
+    // displace it was the same stale copy that installed it.
+    //
+    // Keeping the true original on the object instead means a second call re-wraps a clean
+    // function rather than wrapping its own wrapper, and the newest copy of this module
+    // always wins.
+    const original = ScreenshotsUtils._zenEaselOriginalCreateCanvas ||
+        ScreenshotsUtils.createCanvas;
+    ScreenshotsUtils._zenEaselOriginalCreateCanvas = original;
     ScreenshotsUtils._zenEaselBackdrop = true;
 
     // createCanvas is the single funnel for all four of Zen's screenshot outputs — save
     // visible page, save full page, copy region, download region — and every internal
     // caller reaches it as `this.createCanvas`, so replacing the property covers all of
-    // them. Deliberately not async: the original returns a promise and so must this, but
-    // wrapping the body in an async function would also swallow the synchronous throw
-    // path into a rejection and change how a caller that never expected one behaves.
+    // them. The preview dialog comes along for free: it displays whatever this returns.
     //
-    // Known gap: createCanvas also fills its OffscreenCanvas with rgb(255,255,255) before
-    // it draws, to cover the device-pixel rows that rounding leaves the renderer short of.
-    // That fill is inside the original and cannot be reached from out here, so on a
-    // fractional devicePixelRatio a dark backdrop can still leave a white hairline at the
-    // right or bottom edge. Substituting the drawSnapshot colour is the whole of what this
-    // can do without reimplementing the function.
-    ScreenshotsUtils.createCanvas = function (region, browser) {
+    // This used to wrap the original and substitute the colour further down, by shimming
+    // drawSnapshot on the window global for the duration of the call. That was three moving
+    // parts — an own-property shim with a prototype fallback, a WeakMap of in-flight
+    // captures keyed on a reflector, and a gate that only fired when the caller passed
+    // Firefox's exact white literal — and if any one of them missed, the capture came out
+    // white with nothing said about why. It also could not reach the fillRect *inside*
+    // createCanvas, which left a white hairline along the right and bottom edges at a
+    // fractional devicePixelRatio.
+    //
+    // Reimplementing the function outright replaces all of that with one substitution in
+    // each of the two places the colour is actually used. It is a faithful copy of
+    // ScreenshotsUtils.createCanvas — including the modulo arithmetic on the tile offsets,
+    // which is load-bearing: a devicePixelRatio like 0.3 floors snapshotSize to 307 while
+    // tiles start every 307.2 device pixels, and without the correction every fifth tile
+    // lands a pixel out and leaves a visible seam.
+    ScreenshotsUtils.createCanvas = async function (region, browser) {
         let color = null;
         try {
             color = backdropFor(browser);
         } catch (e) {
             console.error("[zen-easel] could not work out a capture backdrop:", e);
         }
+        // No opinion — off, not a transparent tab, or no window to ask. Firefox's own
+        // white is then exactly the right answer, and the original is left to give it.
         if (!color) return original.call(this, region, browser);
 
-        // The same expression createCanvas itself uses, so the shim lands on the object
-        // it will actually call. Resolved once here rather than per tile: a full-page
-        // capture loops over drawSnapshot, and re-reading it would only matter if the tab
-        // navigated mid-capture, in which case losing the backdrop is the right answer.
-        let windowGlobal = null;
         try {
-            windowGlobal = BrowsingContext.get(browser.browsingContext.id)?.currentWindowGlobal;
-        } catch (e) { }
-        if (!windowGlobal) return original.call(this, region, browser);
-
-        // A window global that died between being fetched and being shimmed throws on
-        // property access. Nothing about a backdrop is worth failing a screenshot over,
-        // so this path gives up and lets Firefox take its usual picture.
-        let release;
-        try {
-            release = holdBackdrop(windowGlobal, color);
+            return await drawOnto(this, region, browser, color);
         } catch (e) {
-            console.warn("[zen-easel] could not install the capture backdrop:", e);
+            // A colour Gecko will not parse, a tab that navigated mid-capture, a rect it
+            // refused. None of these are worth failing a screenshot over, so the picture
+            // is taken again the way Firefox would have taken it. Note the region has been
+            // rounded and clamped by now; both operations are idempotent, so handing it to
+            // the original a second time is safe.
+            console.warn("[zen-easel] the capture backdrop was refused, " +
+                "falling back to white:", e);
             return original.call(this, region, browser);
         }
-
-        let result;
-        try {
-            result = original.call(this, region, browser);
-        } catch (e) {
-            release();
-            throw e;
-        }
-        return Promise.resolve(result).finally(release);
     };
 
     return true;
+}
+
+/* -------------------------------------------------------------------- the copy */
+
+// ScreenshotsUtils.createCanvas, with `color` wherever it hardcodes rgb(255,255,255).
+// `utils` is the ScreenshotsUtils object the call came in on, so the helpers it reaches for
+// are its own rather than a copy of them.
+async function drawOnto(utils, region, browser, color) {
+    region.left = Math.round(region.left);
+    region.right = Math.round(region.right);
+    region.top = Math.round(region.top);
+    region.bottom = Math.round(region.bottom);
+    region.width = Math.round(region.right - region.left);
+    region.height = Math.round(region.bottom - region.top);
+
+    // Zen's own clamp, and it also raises the "too large" alert, so it stays on the object.
+    utils.cropScreenshotRectIfNeeded(region);
+
+    const { devicePixelRatio } = region;
+    const browsingContext = BrowsingContext.get(browser.browsingContext.id);
+
+    const canvas = new OffscreenCanvas(
+        region.width * devicePixelRatio,
+        region.height * devicePixelRatio
+    );
+    const context = canvas.getContext("2d");
+
+    // The first of the two substitutions. This fill covers the device-pixel rows rounding
+    // leaves the renderer short of; white here is what put a pale edge on a dark capture.
+    context.fillStyle = color;
+    context.fillRect(0, 0, canvas.width, canvas.height);
+
+    const snapshotSize = Math.floor(MAX_SNAPSHOT_DIMENSION * devicePixelRatio);
+
+    for (let startLeft = region.left; startLeft < region.right;
+        startLeft += MAX_SNAPSHOT_DIMENSION) {
+        for (let startTop = region.top; startTop < region.bottom;
+            startTop += MAX_SNAPSHOT_DIMENSION) {
+
+            const height = startTop + MAX_SNAPSHOT_DIMENSION > region.bottom
+                ? region.bottom - startTop : MAX_SNAPSHOT_DIMENSION;
+            const width = startLeft + MAX_SNAPSHOT_DIMENSION > region.right
+                ? region.right - startLeft : MAX_SNAPSHOT_DIMENSION;
+
+            // The second substitution: what shows through wherever the page itself paints
+            // nothing, which on a transparent Zen tab is most of it.
+            const snapshot = await browsingContext.currentWindowGlobal.drawSnapshot(
+                new DOMRect(startLeft, startTop, width, height),
+                devicePixelRatio,
+                color
+            );
+
+            const left = Math.floor((startLeft - region.left) * devicePixelRatio);
+            const top = Math.floor((startTop - region.top) * devicePixelRatio);
+            context.drawImage(
+                snapshot,
+                left - (left % snapshotSize),
+                top - (top % snapshotSize),
+                Math.floor(width * devicePixelRatio),
+                Math.floor(height * devicePixelRatio)
+            );
+
+            snapshot.close();
+        }
+    }
+
+    return canvas;
 }
 
 /* ---------------------------------------------------------------- the colour */
@@ -154,102 +214,61 @@ export function installScreenshotBackdrop() {
 // A window whose Zen Easel host has not loaded — or has been torn down — simply has no
 // opinion, and the capture falls through to Firefox's white.
 function backdropFor(browser) {
-    const win = browser && browser.ownerGlobal;
-    const backdrop = win && win.gZenEaselCaptureBackdrop;
-    if (!backdrop || typeof backdrop.resolve !== "function") return null;
+    const backdrop = hostWindowFor(browser);
+    if (!backdrop) return null;
 
     const color = backdrop.resolve(browser);
     return typeof color === "string" && color ? color : null;
 }
 
-/* ------------------------------------------------------------------ the shim */
+// Finds the gZenEaselCaptureBackdrop published by the window that owns this browser.
+//
+// This used to be `browser.ownerGlobal` and nothing else, and was widened when Copy,
+// Download and both Save buttons were compositing onto white while Zen Easel's own captures
+// were fine. Worth being straight about the evidence: that symptom is fully explained by the
+// stale-module early return removed from installScreenshotBackdrop above — an older revision
+// owned createCanvas for the session and this file never ran. Zen Easel's own path was
+// unaffected for the same reason it looks unaffected here: it reads the object straight out
+// of its window script's closure and never goes through this lookup at all.
+//
+// `ownerGlobal` was never shown to fail. It is defined as `ownerDocument.defaultView`, and
+// for a <browser> in the chrome document that is the browser window. Attempts to measure it
+// otherwise were reading the Browser Console, which cannot see the property at all and
+// reports null for every node including document.documentElement.
+//
+// So the extra candidates below are unverified belt-and-braces, not a fix for anything
+// diagnosed. Each is checked for the object itself rather than for being a plausible window,
+// which is the right shape if a lookup ever does land somewhere hostless — but if this ever
+// needs touching again, delete rather than extend.
+function hostWindowFor(browser) {
+    const candidates = [];
 
-// Makes drawSnapshot answer with `color` instead of Firefox's white, for this window
-// global, until the returned function is called.
-function holdBackdrop(windowGlobal, color) {
-    active.set(windowGlobal, color);
-    installShim(windowGlobal);
-    return () => active.delete(windowGlobal);
-}
+    try { candidates.push(browser.ownerGlobal); } catch (e) { }
+    // What the mod's own actors use to get from a browsing context back to chrome, and what
+    // holds up in the cases ownerGlobal does not. There is no third route worth trying:
+    // ownerDocument.defaultView is what ownerGlobal already is.
+    try { candidates.push(browser.browsingContext?.topChromeWindow); } catch (e) { }
 
-// The shim itself is installed once and then left alone — it is not what decides anything.
-// With no entry in `active` for the window global it is called on, it hands straight
-// through to the real method, so leaving it in place costs one WeakMap lookup per snapshot
-// and removes every way that a capture ending could disturb one still running.
-function installShim(windowGlobal) {
-    if (windowGlobal.drawSnapshot && windowGlobal.drawSnapshot._zenEaselBackdrop) return;
+    for (const win of candidates) {
+        const backdrop = win && win.gZenEaselCaptureBackdrop;
+        if (backdrop && typeof backdrop.resolve === "function") return backdrop;
+    }
 
-    const proto = Object.getPrototypeOf(windowGlobal);
-    const real = proto && proto.drawSnapshot;
-    if (typeof real !== "function") return;
-
-    // First choice: an own property on this one WindowGlobalParent, shadowing the
-    // prototype method. Nothing outside this single tab's window global can see it, and it
-    // dies with the window global — on navigation, or when the tab closes.
-    const shim = function (rect, scale, background, ...rest) {
-        return draw(real, this, rect, scale, background, active.get(this), rest);
-    };
-    shim._zenEaselBackdrop = true;
-
+    // Last resort: any open browser window that has a host. The colour is read from Zen's
+    // own theme variables, which are the same in every window of a profile, so borrowing
+    // another window's answer is very nearly always the same answer — and a backdrop from
+    // the wrong window still beats the white this exists to replace. The exception is a
+    // private or unsynced window, whose --zen-main-browser-background is its own; a capture
+    // there that fell this far would take the ordinary window's colour instead.
+    //
+    // Only reached when both direct routes have failed, and nothing is known to reach this
+    // far — see the note above. It is the floor, not a route with a case behind it.
     try {
-        Object.defineProperty(windowGlobal, "drawSnapshot", {
-            value: shim,
-            configurable: true,
-            writable: true
-        });
+        for (const win of Services.wm.getEnumerator("navigator:browser")) {
+            const backdrop = win.gZenEaselCaptureBackdrop;
+            if (backdrop && typeof backdrop.resolve === "function") return backdrop;
+        }
     } catch (e) { }
 
-    if (Object.prototype.hasOwnProperty.call(windowGlobal, "drawSnapshot")) return;
-
-    // Fallback, if a future Gecko ever seals its reflectors: patch the prototype instead.
-    shimPrototype(proto, real);
-}
-
-// Installed at most once per process and then left alone, rather than put up and taken down
-// around each capture. Two windows can be screenshotting at the same moment, and
-// install/restore pairs that interleave leave one window's patch layered permanently under
-// the other's. Left in place, it is a single WeakMap lookup on the way past for everything
-// else in the browser that draws a snapshot — tab thumbnails, print preview, other add-ons
-// — because nothing is in `active` unless a Zen Easel-backed capture is actually in flight.
-function shimPrototype(proto, real) {
-    if (prototypePatched) return;
-    prototypePatched = true;
-
-    console.warn("[zen-easel] this window global would not take an own drawSnapshot, " +
-        "so the capture backdrop is falling back to a gated prototype hook");
-
-    const shim = function (rect, scale, background, ...rest) {
-        return draw(real, this, rect, scale, background, active.get(this), rest);
-    };
-    // Marked like the own-property shim so installShim recognises it and stops
-    // re-deriving a wrapper on every capture once this path has been taken.
-    shim._zenEaselBackdrop = true;
-    proto.drawSnapshot = shim;
-}
-
-// One body, two installation sites. Substitutes the colour, and falls back to whatever the
-// caller asked for if the substitution is refused — so the worst case is a white screenshot
-// rather than a screenshot that failed.
-//
-// `background !== FIREFOX_WHITE` is the other half of the gate: only the "no opinion, use
-// white" case is answered, so a snapshot taken during our capture by something with a
-// deliberate colour of its own is left exactly as it was.
-function draw(real, self, rect, scale, background, color, rest) {
-    if (!color || background !== FIREFOX_WHITE) {
-        return real.call(self, rect, scale, background, ...rest);
-    }
-
-    const fallBack = e => {
-        console.warn("[zen-easel] the capture backdrop colour was refused, " +
-            "falling back to white:", e);
-        return real.call(self, rect, scale, background, ...rest);
-    };
-
-    let attempt;
-    try {
-        attempt = real.call(self, rect, scale, color, ...rest);
-    } catch (e) {
-        return fallBack(e);
-    }
-    return Promise.resolve(attempt).catch(fallBack);
+    return null;
 }

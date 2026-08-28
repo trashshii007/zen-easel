@@ -40,9 +40,13 @@ Each board opens in its own tab.
 
 <img width="396" height="186" alt="image" src="https://github.com/user-attachments/assets/5afb6da3-0d11-464d-b8b3-0bb99021feaf" />
 
-- Screenshot → **Move to easel**
-- Save visible/full page → **Move to easel**
-- `Ctrl+Shift+2`
+Drag a region first, then choose where it goes.
+
+- Screenshot → drag a region → **Easel** on the bar beside Copy and Download
+- Save visible/full page → **Easel** in the preview
+- `Ctrl+Shift+2` opens Zen's own screenshot overlay
+
+Picking **Easel** opens a menu of your boards, most recently used first, plus *New Easel*.
 
 ## Tools
 

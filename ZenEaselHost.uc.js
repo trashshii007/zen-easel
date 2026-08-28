@@ -1,15 +1,14 @@
 // ==UserScript==
 // @name           Zen Easel (host)
 // @description    Opens about:easel, captures regions, and bridges the page to Zen
-// @version        0.2.0
 // ==/UserScript==
 
 // The browser-window half of Zen Easel.
 //
 // The easel itself is a document now — about:easel, in its own tab. What stays behind in
 // browser.xhtml is only what genuinely cannot live in a page: taking a snapshot of
-// whatever tab you are looking at, drawing the region picker over Zen's chrome, hooking
-// Zen's own screenshot UI, the toolbar button, and the global shortcut.
+// whatever tab you are looking at, hooking Zen's own screenshot UI, the toolbar button,
+// and the global shortcut.
 //
 // Everything this exposes to the page goes through gZenEaselHost, and every value that
 // crosses is a plain string, number or byte array. The page holds a reference to this
@@ -89,7 +88,7 @@
                 window.addEventListener("keydown", this._onKeyDown, true);
                 window.addEventListener("unload", this._onUnload, { once: true });
 
-                // Adds "Move to easel" to Zen's own screenshot preview. Lives here rather
+                // Adds "Easel" to Zen's region bar and screenshot preview. Lives here rather
                 // than in the page because it has to work when no easel is open, which is
                 // the usual case when taking a screenshot.
                 this.screenshotHook = new window.ZenEaselScreenshotHook(this);
@@ -321,7 +320,7 @@
             // Both routes point at the one icon file, which strokes itself with
             // context-fill for the reason set out in its own header.
             try {
-                gBrowser.setIcon(tab, BASE + "resources/zen-easel.svg");
+                gBrowser.setIcon(tab, BASE + "resources/zen-easel-board.svg");
             } catch (e) { }
 
             return tab;
@@ -364,41 +363,40 @@
             if (matchesShortcut(e, this._shortcuts.capture)) {
                 e.preventDefault();
                 e.stopPropagation();
-                this.captureRegion();
+                this.startCapture();
+            }
+        }
+
+        // Starts Zen's own screenshot overlay, which now carries an "Easel" button on the
+        // bar it shows under a dragged region. This used to open a region picker of the
+        // mod's own; there is no reason to have two, and Zen's has element highlighting and
+        // resize handles that this one never grew.
+        //
+        // Notifying the observer directly rather than calling ScreenshotsUtils.notify(), and
+        // the difference is not stylistic: notify() reads window.event.currentTarget.
+        // documentGlobal, which only resolves from a command handler where currentTarget is
+        // the document. This runs from a keydown listener bound on the window, where
+        // documentGlobal is undefined and ScreenshotsUtils.observe() then dies destructuring
+        // gBrowser off it. The observer wants the window, so it is handed the window.
+        //
+        // "Shortcut" is the telemetry label Zen's own keybinding uses, and the topic keeps
+        // notify()'s toggle behaviour: pressing it again while the overlay is up cancels.
+        startCapture() {
+            try {
+                Services.obs.notifyObservers(window, "menuitem-screenshot", "Shortcut");
+            } catch (e) {
+                console.error("[zen-easel] could not start a screenshot:", e);
+                this.toast("Could not start a screenshot");
             }
         }
 
         /* ------------------------------------------------------------- capture */
 
-        // target: an easel id to drop onto, "new" for a fresh easel, or null for whichever
-        // easel is already open (or was last open).
-        async captureRegion(target = null) {
-            try {
-                const picker = new window.ZenEaselCaptureHost();
-                const result = await picker.pickRegionAndCapture();
-                picker.destroy();
-                if (!result) return;
-                await this.openWithCapture(target, result);
-            } catch (e) {
-                console.error("[zen-easel] capture failed:", e);
-                this.toast(e && e.message ? e.message : "Capture failed");
-            }
-        }
-
-        // The whole viewport, with no region picker in the way. Same destination handling
-        // as captureRegion — the only difference is what gets photographed.
-        async captureFullWindow(target = null) {
-            try {
-                const picker = new window.ZenEaselCaptureHost();
-                const result = await picker.captureFullWindow();
-                picker.destroy();
-                if (!result) return;
-                await this.openWithCapture(target, result);
-            } catch (e) {
-                console.error("[zen-easel] full-window capture failed:", e);
-                this.toast(e && e.message ? e.message : "Capture failed");
-            }
-        }
+        // captureRegion and captureFullWindow used to live here, each standing up the mod's
+        // own picker. Both are gone: a capture now starts in Zen's overlay and arrives
+        // through screenshot-hook, which calls openWithCapture directly with a region Zen
+        // already selected. What is left below is the destination handling they shared,
+        // which was always the part worth keeping.
 
         async openWithCapture(target, capture) {
             // "new" makes its document first and gets a tab of its own. It used to be

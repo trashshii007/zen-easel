@@ -1,9 +1,13 @@
 /* Zen Easel — global chrome styles.
  *
- * Only the two things that must live outside the overlay's shadow root: the toolbar
- * button, and the region-capture overlay (which is deliberately built in the chrome
- * document so it works over about: pages and the PDF viewer, where a content script
- * would never run).
+ * Only what must live outside the easel's own shadow root: the toolbar button, the bundled
+ * @font-face rules, the split-view workaround, the send-to-easel menu, and the live-card
+ * bar.
+ *
+ * The region-capture overlay's rules used to be here too. They went with the picker they
+ * styled — captures now start in Zen's own screenshot overlay, which brings its own. The
+ * "send to easel" menu is a XUL menupopup and gets everything else from Zen's menu theming;
+ * all it needs here is the palette of the surface it opens against.
  */
 
 #zen-easel-button .toolbarbutton-icon {
@@ -99,52 +103,6 @@
   font-display: swap;
 }
 
-/* ---------------------------------------------------------- capture overlay */
-
-.zen-easel-capture-overlay {
-  position: fixed;
-  z-index: 2147483646;
-  cursor: crosshair;
-  background: rgba(0, 0, 0, 0.28);
-  /* The dim is moved onto the selection rectangle's outset shadow once a drag
-     starts, so the region being chosen stays at full brightness. */
-  transition: background 90ms ease-out;
-}
-
-.zen-easel-capture-overlay.is-selecting {
-  background: transparent;
-}
-
-.zen-easel-capture-rect {
-  position: absolute;
-  border: 1px solid rgba(255, 255, 255, 0.95);
-  box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.28);
-  pointer-events: none;
-}
-
-.zen-easel-capture-hint {
-  position: absolute;
-  top: 22px;
-  left: 50%;
-  transform: translateX(-50%);
-  padding: 8px 15px;
-  border-radius: 999px;
-  background: rgba(20, 20, 22, 0.88);
-  color: #fff;
-  font: message-box;
-  font-size: 13px;
-  white-space: nowrap;
-  pointer-events: none;
-  transition: opacity 120ms ease-out;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .zen-easel-capture-overlay,
-  .zen-easel-capture-hint {
-    transition: none;
-  }
-}
-
 /* ------------------------------------------------- split-view flicker workaround */
 
 /* Both paired with modules-host/split-resize.uc.js, and both inert unless it is doing
@@ -168,6 +126,41 @@
  * it — without this it paints over its neighbour and over Zen's sidebar. */
 #tabbrowser-tabpanels[zen-easel-split-frozen] .browserSidebarContainer {
   overflow: hidden;
+}
+
+/* --------------------------------------------------- send-to-easel menu */
+
+/* The menu opens against Zen's screenshot bar, and a menupopup is themed as browser chrome
+ * while that bar is in-content chrome — two different palettes, meeting at one seam.
+ *
+ * #buttons-container paints --background-color-canvas at --border-radius-small with 4px of
+ * padding, and its buttons take --text-color. Those names exist in this window too, but the
+ * browser window loads tokens-platform where the overlay loads tokens-brand, so they resolve
+ * to different colours here. Restated below is what they resolve to *there*, against the same
+ * palette and behind the same pref, so the menu keeps following the bar when either changes.
+ *
+ * !important throughout because this file is a user sheet, so popup.css outranks it otherwise;
+ * the submenu is named separately because popup.css sets these on every menupopup, and a
+ * declaration on the child beats anything inherited from the parent. */
+#zen-easel-send-to,
+#zen-easel-send-to menupopup {
+  --panel-background-color: light-dark(var(--color-white), var(--color-gray-90)) !important;
+  --panel-text-color: light-dark(var(--color-gray-100), var(--color-gray-0)) !important;
+  --panel-border-color: transparent !important;
+  /* Flips 4px → 8px on the same pref as the block below, so this one needs no counterpart. */
+  --panel-border-radius: var(--border-radius-small) !important;
+  --panel-padding: 4px !important;
+
+  @media -moz-pref("browser.nova.enabled") {
+    --panel-background-color: light-dark(var(--color-gray-05), var(--color-gray-85)) !important;
+  }
+}
+
+/* -moz-menuhover is an OS colour picked to sit on an OS menu, not on the bar's canvas; this is
+ * what the bar's own buttons use for the same state. */
+#zen-easel-send-to :is(menuitem, menu)[_moz-menuactive]:not([disabled]) {
+  background-color: color-mix(in srgb, currentColor 14%, transparent) !important;
+  color: var(--panel-text-color) !important;
 }
 
 /* ------------------------------------------------------- floating card bar */

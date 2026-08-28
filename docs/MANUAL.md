@@ -38,24 +38,22 @@ is why an Arc board never needs a title bar. Delete it and the easel keeps its n
 one back, right-click any text box and choose **Use as easel title**.
 
 Captures always keep the source URL, so double-clicking a card later takes you back to
-the page it came from. There are three ways in:
+the page it came from. The shape is always the same — take the picture first, then say
+where it goes — and there are two ways in:
 
-- **Zen's screenshot button.** Press it and the panel that appears — *Save visible page*
-  / *Save full page* — now also offers **Move to easel**. Pick an easel and you get a
-  region picker; drag, and it lands there.
-- **After *Save visible page* or *Save full page*.** The preview that follows has a
-  **Move to easel** button beside Copy and Download.
-- **Ctrl+Shift+2.** Drag a region and it drops straight onto the easel you had open
-  last, no menus. Fastest when you already know where it is going.
+- **A dragged region.** Zen's screenshot button, or **Ctrl+Shift+2**. Drag a selection
+  and the bar that appears under it carries **Easel** beside Copy and Download.
+- **After *Save visible page* or *Save full page*.** The preview that follows has an
+  **Easel** button beside Copy and Download.
 
-In the region picker you can also just **click**, without dragging: the element under the
-pointer is outlined as you move, and clicking captures it. This is Arc's
-`canClickToCapture` — the page is asked which element you are over and it scores them the
-way Arc does, rejecting slivers and anything that is effectively the whole page, and
-preferring images and video. It is much the faster way to grab an article, a card or a
-chart. The screenshot panel also offers **Whole window to easel**, which skips the picker.
+Either one opens the same menu: your three most recently used boards, then *New Easel*,
+then *See all easels…* if there are more. Nothing is captured until a destination is
+picked, so backing out of the menu leaves the selection exactly where it was.
 
-*New easel…* appears in both menus and starts a fresh board from the capture.
+Zen's overlay does the selecting, which is why there is no picker of this mod's own any
+more. That is a straight gain: it highlights the element under the pointer, gives the
+selection resize handles, and scrolls the page when a drag reaches the window edge —
+none of which the picker that used to live here ever grew.
 
 Everything is mouse-and-keyboard first. Arc's Easel was built around a Mac trackpad;
 every gesture here has a keyboard and mouse equivalent, and nothing is reachable only
@@ -611,13 +609,14 @@ the three parts is doing anything wrong.
 
 A snapshot has no browser window behind it — nothing is there at all. So the light text you
 read comfortably over a dark Zen window lands on pure white and half of it disappears. It
-is also why **Move to easel** from the preview dialog looks the same: that image was
+is also why **Easel** from the preview dialog looks the same: that image was
 already taken by Zen through `createCanvas` before this mod ever saw it.
 
 #### What is done about it
 
-The colour that was actually behind the page is put into the picture, by changing the one
-argument that decides it — `drawSnapshot`'s third.
+The colour that was actually behind the page is put into the picture, in both of the two
+places `createCanvas` hardcodes white: the `fillRect` that backs the canvas, and the
+background handed to `drawSnapshot`.
 
 The page is never touched. An earlier attempt at this made the page opaque for the length
 of the shot with a user-agent-origin sheet, because the extension's rules are author
@@ -633,14 +632,28 @@ Two paths, one answer:
 - **Zen Easel's own captures.** `capture-host.uc.js` passes the colour to `drawSnapshot`
   instead of white, and retries once on white if Gecko refuses it — a backdrop must never
   be the reason a capture fails.
-- **Zen's native screenshots.** `background/capture-backdrop.sys.mjs` wraps
+- **Zen's native screenshots.** `background/capture-backdrop.sys.mjs` takes over
   `ScreenshotsUtils.createCanvas`, which is the single funnel for all four outputs (save
   visible page, save full page, copy region, download region) and is reached internally as
-  `this.createCanvas`, so replacing the property covers every one. It shadows
-  `drawSnapshot` on that one tab's `WindowGlobalParent` with a function that substitutes
-  the colour for as long as that tab has a capture in flight — and only where the caller
-  passed the exact literal `"rgb(255,255,255)"`, so a future Gecko that starts asking for a
-  deliberate colour of its own gets to keep it.
+  `this.createCanvas`, so replacing the property covers every one. The preview dialog comes
+  along for free: it displays whatever that returns.
+
+  The replacement is a faithful copy of Firefox's own `createCanvas` with the colour
+  substituted twice — including the modulo arithmetic on the tile offsets, which is
+  load-bearing: at a `devicePixelRatio` like 0.3 the snapshot size floors to 307 while tiles
+  start every 307.2 device pixels, and without the correction every fifth tile lands a pixel
+  out and leaves a visible seam. Every failure path — a colour Gecko will not parse, a tab
+  that navigated mid-capture, a rect it refused — falls back to calling Firefox's own
+  `createCanvas`, so the worst this can do is produce exactly the white it was written to
+  replace.
+
+  Reimplementing it rather than wrapping it is what closed the last gap. The earlier version
+  shimmed `drawSnapshot` for the duration of the call, which could not reach the `fillRect`
+  *inside* `createCanvas` — so on a fractional `devicePixelRatio` a dark backdrop still left
+  a white hairline along the right and bottom edges. It also had three moving parts that
+  each failed silently: an own-property shim with a prototype fallback, a `WeakMap` of
+  in-flight captures, and a gate that only fired when the caller passed Firefox's exact
+  white literal.
 
 That hook lives in a background module rather than in a window script for a specific
 reason. `ScreenshotsUtils` is an ESM singleton, so patching it is process-global, while
@@ -648,14 +661,28 @@ window scripts are per-window and are nuked when their window closes. A patch in
 from window A that still referenced A's functions would start throwing "can't access dead
 object" the moment A was closed — and the only symptom would be that screenshots quietly
 broke in every *other* window. So it holds no window reference at all: at capture time it
-looks up `browser.ownerGlobal.gZenEaselCaptureBackdrop`, asks it for a colour, uses the
+finds the `gZenEaselCaptureBackdrop` for that browser, asks it for a colour, uses the
 string, and drops it. A window with no Zen Easel host loaded simply has no opinion.
 
-Which window global has a capture in flight is kept in a `WeakMap` rather than a single
-slot, so two windows screenshotting at once do not take each other's backdrop away, and the
-shim is installed once and left in place instead of being put up and taken down around each
-capture — with no entry in that map it hands straight through, which removes every way one
-capture ending could disturb another still running.
+Finding it used to be `browser.ownerGlobal` alone, and it was widened while chasing the
+white screenshots. That turned out to be the wrong suspect: the symptom is fully explained
+by the stale-module early return described below, and `ownerGlobal` was never shown to fail.
+It is defined as `ownerDocument.defaultView`, which for a `<browser>` in the chrome document
+is the browser window. Attempts to measure it otherwise were reading the Browser Console,
+which cannot see that property at all and reports null for every node, `documentElement`
+included — a good reminder that a console reading is a measurement of the console until a
+known-good control says otherwise. The extra candidates that remain — `topChromeWindow`,
+then any open browser window that has a host — are unverified belt-and-braces rather than a
+fix for anything diagnosed, and the last of them is the one branch that could answer with
+the wrong window's colour in a private or unsynced window.
+
+Installation is restore-then-repatch rather than an early return on a marker. The early
+return was the one path that did nothing and still reported success — the caller logged
+"hooked: true" and every screenshot still came out white — and it made the module
+impossible to fix in place, because a patch installed by an earlier revision owned the
+property for the session and the only code that could displace it was that same stale copy.
+Keeping the true original on the object means a second call re-wraps a clean function
+rather than wrapping its own wrapper, and the newest copy always wins.
 
 #### Where the colour comes from
 
@@ -828,7 +855,7 @@ window still open.
 | | |
 |---|---|
 | `background/registry.sys.mjs` | registers `about:easel`, and installs the actors at boot |
-| `background/actors.sys.mjs` | what the two window actors are, and how to install them |
+| `background/actors.sys.mjs` | what the three window actors are, and how to install them |
 | `background/store.sys.mjs` | owns the disk: index, write queue, shutdown blocker, asset sweep |
 | `background/validate.sys.mjs` | the URL/id/asset-name rules, shared by everything |
 | `background/capture-backdrop.sys.mjs` | hooks `ScreenshotsUtils.createCanvas` so Zen's own screenshots composite onto the window's colour instead of white |
@@ -838,8 +865,8 @@ window still open.
 | | |
 |---|---|
 | `ZenEaselHost.uc.js` | toolbar button, shortcut, opening/focusing the easel tab, the bridge |
-| `modules-host/capture-host.uc.js` | region picker over Zen's chrome, `drawSnapshot` |
-| `modules-host/screenshot-hook.uc.js` | "Move to easel" inside Zen's screenshot preview |
+| `modules-host/capture-host.uc.js` | turns a region Zen selected into pixels, via `drawSnapshot`, and measures the page for a live card |
+| `modules-host/screenshot-hook.uc.js` | the **Easel** button on Zen's region bar and preview dialog, and the send-to-easel menu behind both |
 | `modules-host/capture-backdrop.uc.js` | works out what colour was behind the page, for both capture paths |
 | `modules-host/live-host.uc.js` | the live tiles themselves — `<browser>` elements, the layer over the easel tab, load watching |
 | `modules-host/split-resize.uc.js` | not an easel feature: fixes a Zen split-divider bug where mouse events from an in-process about: page arrive in that page's coordinates, so the divider snaps and the panes strobe. Behind a setting, and meant to be deleted once Zen fixes it upstream |
@@ -896,21 +923,30 @@ such guarantee — `pagehide` cannot await — so `pagehide` only serialises the
 into the queue, and that queue's `AsyncShutdown` blocker owns the guarantee from there.
 It also means two easel tabs cannot race each other on `index.json`.
 
-### The two actors
+### The three actors
 
 | | |
 |---|---|
 | `ZenEaselCapture` | measures the viewport and crop rect inside the page being captured |
 | `ZenEaselLive` | the scroll lock, selection lock and link interception inside a live card |
+| `ZenEaselScreenshot` | draws the **Easel** button on Zen's region bar, and reports a click |
 
 `ZenEaselLive` is scoped by `messageManagerGroups: ["zen-easel-live"]`, matching an
 attribute only `live-host.uc.js` sets, so it attaches to live tiles and to nothing else
 in the browser. Its input listeners are registered in the system event group, so a page
 calling `stopPropagation()` cannot get underneath them.
 
-`ZenEaselCapture` has to reach ordinary tabs, so its group is the default `browsers` —
-but it declares no events and no observers, which means the child is never instantiated
-until the parent calls `getActor()`. At rest it costs nothing and sees nothing.
+`ZenEaselCapture` and `ZenEaselScreenshot` have to reach ordinary tabs, so their group is
+the default `browsers` — but neither declares any events or observers, which means the
+child is never instantiated until the parent calls `getActor()`. At rest they cost nothing
+and see nothing.
+
+`ZenEaselScreenshot` exists because Zen's region bar cannot be reached any other way: it
+is built with `document.insertAnonymousContent()` from `ScreenshotsOverlayChild`, in the
+*content* process, so it is neither in the chrome document nor in any shadow root a chrome
+script can walk. The child patches `ScreenshotsOverlay.prototype` once per content process
+— install-once, restore-never, because the flag lives on an object shared by every document
+in that process and any teardown would disarm the button for every other tab.
 
 **Everything is painted to canvas, across three layers.** This follows the split
 Excalidraw uses:
@@ -953,37 +989,50 @@ the types named in Arc's binary.
 - **Ink consumes coalesced pointer events**, so throttling to one frame does not
   straighten fast strokes.
 
-**The screenshot integration reaches two of Zen's three surfaces.** They are not equally
-reachable, and the difference decides the UX:
+**The screenshot integration reaches two of Zen's three surfaces**, which between them
+cover every way a capture can be made. Where each one lives decides how it is reached:
 
-| Surface | Where it lives | Reachable |
+| Surface | Where it lives | How it is reached |
 |---|---|---|
-| Buttons panel (*Save visible / full page*) | `MozXULElement` in the chrome document, open shadow root | yes — its class is defined per window, so patching `connectedCallback` catches every instance |
-| Preview dialog (*Copy / Download*) | Lit element in a tab dialog | yes — via the document it loads |
-| Region bar (*Copy / Download* under a dragged selection) | `insertAnonymousContent()` in the **content process** | **no** — chrome has no handle to another component's anonymous content |
+| Region bar (*Copy / Download* under a dragged selection) | `insertAnonymousContent()` in the **content process** | from inside that process — the `ZenEaselScreenshot` child actor patches `ScreenshotsOverlay.prototype` and builds the button as part of the overlay's own markup |
+| Preview dialog (after *Save visible / full page*) | Lit element in a tab dialog | directly — via the document it loads |
+| Buttons panel (*Save visible / full page*) | `MozXULElement` in the chrome document, open shadow root | no longer used — both routes it offered now arrive by way of the preview dialog |
 
-Because the region bar is out of reach, picking an easel from the buttons panel *hands
-off* instead: it calls `ScreenshotsUtils.exit()` to dismiss Zen's overlay, waits for that
-to land in the content process, and starts this mod's own region picker, which is
-chrome-side and already drops captures onto easels. Same capability, one extra step, no
-dependency on Firefox internals beyond `exit()`.
+The panel was dropped rather than kept, and that is the fix for the old "sometimes the
+buttons are missing" bug: `ScreenshotsUtils.openPanel` treats the panel as a per-window
+singleton it only ever re-shows, so a `connectedCallback` patch runs once per window and
+loses a microtask race against `createPanel` every time. What made it work at all was a
+single unretried catch-up query. Nothing races now — the button is rebuilt every time the
+overlay is.
 
-Two constraints shape the injected UI. The preview dialog's CSP is `default-src chrome:`,
-which blocks an injected `<style>` — so every style is set as an element property, and
-the menu is built the same way on both surfaces to stop them drifting apart. And the
-preview's `blob:` URL is created inside `ScreenshotsUtils.sys.mjs`, so rather than argue
-about which global may read it, the pixels are re-encoded from the `<img>` the dialog has
-already loaded.
+There is no hand-off any more either. The mod used to dismiss Zen's overlay and stand up a
+region picker of its own; the region the user dragged is now encoded straight out of the
+selection Zen already holds, so there is one capture UI in the browser rather than two, no
+second overlay, and no delay between them.
 
-**Region capture runs in the parent process.** Selection is a chrome-level overlay, not
-a content script, so it needs no frame script, ignores page CSP, and still works on
-`about:` pages and in the PDF viewer. Pixels come from
-`WindowGlobalParent.drawSnapshot` — the same privileged path Firefox Screenshots uses.
-The whole viewport is snapshotted and cropped locally, because a sub-rect would have to
-be given in document coordinates, which means knowing the content's scroll offset,
-which from the parent process means standing up a JSActor for nothing. The true scale
-is measured from the returned bitmap rather than assumed from
-`devicePixelRatio × fullZoom`, so HiDPI and page zoom correct themselves.
+One constraint shapes the injected UI, and one used to. The preview's `blob:` URL is
+created inside `ScreenshotsUtils.sys.mjs`, so rather than argue about which global may read
+it, the pixels are re-encoded from the `<img>` the dialog has already loaded. The old
+constraint was the preview dialog's `default-src chrome:` CSP, which blocks an injected
+`<style>` and forced every menu style to be set as an element property — gone with the
+hand-built menu, which is now a XUL `menupopup` in `mainPopupSet`. That is an OS-level
+widget: nothing can clip it, it dismisses and keyboard-navigates itself, it flips at a
+screen edge, and Zen themes it.
+
+**Region capture runs in the parent process.** Pixels come from
+`WindowGlobalParent.drawSnapshot` — the same privileged path Firefox Screenshots uses —
+asked for an explicit document-space rect and tiled, because `drawSnapshot` refuses a rect
+past `MAX_SNAPSHOT_DIMENSION`. Snapshotting the viewport and cropping was sound only while
+the mod's own picker drew its rect over the visible browser and so could not select
+anything off-screen. Zen's overlay can: a drag that reaches the window edge scrolls the
+page under it, and cropping a viewport bitmap for one of those returns whatever happens to
+be at those coordinates now — silently, with a picture that looks like a successful capture
+of the wrong thing.
+
+The rect arrives in **content** CSS pixels, relative to the document and already
+zoom-corrected, where the old picker's was in chrome pixels and had page zoom divided out.
+The two are not interchangeable, and getting it wrong is invisible: both corrections are
+no-ops at 100% zoom.
 
 ---
 
@@ -1007,6 +1056,16 @@ Worth stating plainly rather than leaving implied:
   no network of any kind originates from it. It also listens for `securitypolicyviolation`
   and logs it, because a CSP refusal is not an error anywhere else in the platform: the
   load is simply cancelled with no error page, which is exactly how one went unnoticed.
+- **One actor takes a payload from content, and it is treated as data rather than as a
+  capability.** `ZenEaselScreenshot` is the first: the other two only ever answer with
+  numbers, while this one reports which region was selected and where its button sits on
+  screen. Neither value is trusted with anything. The region is used solely as snapshot
+  coordinates against the very browsing context that reported it, and the anchor is only
+  ever fed to a popup's screen position — so the worst a compromised content process can do
+  with the message is photograph itself and open a menu. It cannot name a different tab, a
+  file, or a destination easel; the destination comes from the menu the user picks in the
+  parent process. Sending the message repeatedly gets it nothing either, because the menu
+  refuses to open a second time while one is already up.
 - **Live cards never run web content in the parent process.** The `<browser>` is declared
   remote before it is inserted, and the site is loaded only after the frame loader has
   actually been created and `isRemoteBrowser` checks out; if it fails the element is

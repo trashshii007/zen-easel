@@ -1,4 +1,4 @@
-// Zen Easel — what the two window actors are, and how to install them.
+// Zen Easel — what the three window actors are, and how to install them.
 //
 // Split out of registry.sys.mjs, and the split is the point rather than tidiness.
 //
@@ -45,9 +45,10 @@ const ACTOR_BASE = "chrome://sine/content/zen-easel/actors/";
 // for no reason visible in this repository's history.
 //
 // What the flag asserts is real and worth honouring: that a compromised content process
-// cannot use this actor to reach anything it should not have. Both of these only ever
-// answer with numbers, and neither accepts anything from the page but a point to hit-test
-// — see the two child actors.
+// cannot use this actor to reach anything it should not have. None of the three take an
+// instruction from the page: two only answer with numbers, and the third reports a region
+// used solely as snapshot coordinates against the very context that sent it — see the
+// three child actors.
 const SAFE_IN_CONTENT = true;
 
 export const ACTOR_OPTIONS = {
@@ -100,6 +101,24 @@ export const ACTOR_OPTIONS = {
         messageManagerGroups: ["browsers"],
         allFrames: true,
         safeForUntrustedWebProcess: SAFE_IN_CONTENT
+    },
+
+    // The screenshot-bar actor: the only way to reach the Copy/Download bar Zen draws under
+    // a dragged region, which is anonymous content in the content process.
+    //
+    // allFrames is false where the other two are true, and that is not an oversight. Zen's
+    // screenshot overlay is only ever built against the top-level document, so a subframe
+    // copy of this actor would have nothing to patch and nothing to say.
+    //
+    // Like ZenEaselCapture it declares no events, so the child is never instantiated until
+    // the parent primes it — once per content process, on the first screenshot taken there.
+    // At rest it costs a registration entry and nothing else.
+    ZenEaselScreenshot: {
+        parent: { esModuleURI: `${ACTOR_BASE}ZenEaselScreenshotParent.sys.mjs` },
+        child: { esModuleURI: `${ACTOR_BASE}ZenEaselScreenshotChild.sys.mjs` },
+        messageManagerGroups: ["browsers"],
+        allFrames: false,
+        safeForUntrustedWebProcess: SAFE_IN_CONTENT
     }
 };
 
@@ -109,6 +128,13 @@ export const ACTOR_OPTIONS = {
 // taken and keeps the *old* definition, so registering without it can only ever be a no-op
 // against a stale registration. Unregistering is safe — actors already attached to a
 // document keep working, and only the definition used for the next one changes.
+//
+// Called per *window*, not once per process: screenshot-hook.uc.js runs this from every
+// window's init, because a window opening is the one moment a stale registration can be
+// displaced without a restart. It is a map insert and a notification, so the repetition
+// costs nothing. The one hazard worth knowing is narrow: a window opening in the gap
+// between another window's getActor and its sendQuery would make that call fail, which is
+// what the retry around each getActor site is there to absorb.
 //
 // Returns true when the actor is registered with these options afterwards.
 export function ensureActor(name) {
@@ -129,9 +155,9 @@ export function ensureActor(name) {
     }
 }
 
-// Every actor, each independent of the others: one runs inside live tiles, the other
-// measures an ordinary tab at capture time, and a throw from the first must not take the
-// second with it.
+// Every actor, each independent of the others: one runs inside live tiles, one measures an
+// ordinary tab at capture time, one draws the button on Zen's region bar — and a throw from
+// any of them must not take the rest with it.
 export function ensureActors() {
     for (const name of Object.keys(ACTOR_OPTIONS)) ensureActor(name);
 }

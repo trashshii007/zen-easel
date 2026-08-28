@@ -1,15 +1,19 @@
 // Zen Easel — taking the picture.
 //
-// The browser-window half of what used to be capture.uc.js. Region selection runs
-// entirely in the chrome process: doing the selection here rather than in a content
-// script means it needs no frame script, is not blocked by a page's CSP, and still works
-// on about: pages and the PDF viewer where content injection is refused outright.
+// The browser-window half of what used to be capture.uc.js. It no longer selects anything:
+// this file used to draw its own region picker over Zen's chrome, and that picker is gone.
+// Zen's screenshot overlay now carries an "Easel" button and hands the selection here, so
+// there is one capture UI in the browser rather than two — and it is the one with element
+// highlighting and resize handles.
+//
+// What remains is the part that was always worth keeping: turning a region into pixels, and
+// recording enough about the page that the card made from it can later be shown live.
 //
 // Pixels come from WindowGlobalParent.drawSnapshot — the same privileged path Firefox
-// Screenshots uses. We snapshot the whole viewport and crop locally rather than asking
-// drawSnapshot for a sub-rect: a sub-rect would have to be expressed in document
-// coordinates, which means knowing the content's scroll offset, which from the parent
-// process means standing up a JSActor. Cropping a viewport bitmap needs none of that.
+// Screenshots uses — asked for an explicit document-space rect and tiled. The older code
+// snapshotted the viewport and cropped, which was sound only because its own picker could
+// not select anything off-screen. Zen's can: a drag that reaches the edge of the window
+// scrolls the page under it.
 //
 // Everything handed back to the page is plain data — a byte array, numbers and strings.
 
@@ -18,255 +22,49 @@
 (function () {
     if (window.ZenEaselCaptureHost) return;
 
-    // How often the hover preview may ask the page what is under the pointer. Slow enough
-    // that a moving pointer costs a handful of round trips a second, fast enough that the
-    // highlight does not lag behind the cursor.
-    const PREVIEW_INTERVAL_MS = 60;
-
     // What Firefox composites a snapshot onto, and what this falls back to whenever the
     // capture backdrop has nothing to say.
     const WHITE = "rgb(255,255,255)";
 
+    // Both taken from ScreenshotsUtils, which exports them for the same purpose. The first
+    // is the largest rect drawSnapshot will accept in one call, which is why a document-space
+    // capture has to be tiled; the second is the largest surface Gecko will produce at all.
+    // Kept as literals rather than imported: this file must keep working if a Zen update
+    // renames the export, and being a few hundred pixels conservative costs nothing.
+    const MAX_SNAPSHOT_DIMENSION = 1024;
+    const MAX_CAPTURE_DIMENSION = 32766;
+
     class ZenEaselCaptureHost {
         constructor() {
             this.log = window.ZenEaselUtil.log;
-            this._overlay = null;
-            this._cancelPick = null;
-            this._previewAt = 0;
-            this._previewBusy = false;
         }
 
-        /* ----------------------------------------------------- region selection */
+        /* ------------------------------------------------ captures from Zen's overlay */
 
-        // Resolves with { bytes, width, height, url, title, favicon, capture } or null if
-        // the user cancelled.
-        async pickRegionAndCapture() {
-            const browser = gBrowser.selectedBrowser;
-            if (!browser) return null;
-
-            const region = await this.pickRegion(browser);
-            if (!region) return null;
-
-            return this.captureRegion(browser, region);
-        }
-
-        pickRegion(browser) {
-            return new Promise(resolve => {
-                const rect = browser.getBoundingClientRect();
-                const overlay = document.createElement("div");
-                overlay.className = "zen-easel-capture-overlay";
-                Object.assign(overlay.style, {
-                    left: `${rect.left}px`,
-                    top: `${rect.top}px`,
-                    width: `${rect.width}px`,
-                    height: `${rect.height}px`
-                });
-
-                const selection = document.createElement("div");
-                selection.className = "zen-easel-capture-rect";
-                selection.style.display = "none";
-
-                const hint = document.createElement("div");
-                hint.className = "zen-easel-capture-hint";
-                hint.textContent = "Drag a region, or click something  ·  Esc to cancel";
-
-                overlay.append(selection, hint);
-                document.documentElement.appendChild(overlay);
-                this._overlay = overlay;
-
-                let start = null;
-                let done = false;
-
-                const finish = result => {
-                    if (done) return;
-                    done = true;
-                    cleanup();
-                    resolve(result);
-                };
-
-                const cleanup = () => {
-                    overlay.removeEventListener("pointerdown", onDown);
-                    overlay.removeEventListener("pointermove", onMove);
-                    overlay.removeEventListener("pointerup", onUp);
-                    overlay.removeEventListener("contextmenu", onContextMenu);
-                    window.removeEventListener("keydown", onKeyDown, true);
-                    overlay.remove();
-                    this._overlay = null;
-                    this._cancelPick = null;
-                };
-
-                const onDown = e => {
-                    if (e.button !== 0) return;
-                    start = { x: e.clientX, y: e.clientY };
-                    selection.style.display = "";
-                    hint.style.opacity = "0";
-                    // Hands the dimming over to the selection rect's outset shadow so the
-                    // chosen region is seen at full brightness.
-                    overlay.classList.add("is-selecting");
-                    overlay.setPointerCapture(e.pointerId);
-                    e.preventDefault();
-                };
-
-                const place = box => {
-                    selection.style.display = "";
-                    Object.assign(selection.style, {
-                        left: `${box.x - rect.left}px`,
-                        top: `${box.y - rect.top}px`,
-                        width: `${box.w}px`,
-                        height: `${box.h}px`
-                    });
-                };
-
-                const onMove = e => {
-                    if (!start) {
-                        // Nothing is being dragged, so show what a click would take.
-                        // Without this, click-to-capture is a guess.
-                        this._previewElement(browser, rect, e.clientX, e.clientY, box => {
-                            if (start || done) return;
-                            if (box) {
-                                overlay.classList.add("is-selecting");
-                                hint.style.opacity = "0";
-                                place(box);
-                            } else {
-                                overlay.classList.remove("is-selecting");
-                                hint.style.opacity = "";
-                                selection.style.display = "none";
-                            }
-                        });
-                        return;
-                    }
-                    place(normalize(start, { x: e.clientX, y: e.clientY }, rect));
-                };
-
-                const onUp = async e => {
-                    if (!start) return;
-                    const box = normalize(start, { x: e.clientX, y: e.clientY }, rect);
-                    // A click rather than a drag: take the element under the pointer, which
-                    // is Arc's canClickToCapture. Falling back to null keeps the old
-                    // behaviour for a mis-click on a page that cannot be measured.
-                    if (box.w < 8 || box.h < 8) {
-                        finish(await this._elementRect(browser, rect, e.clientX, e.clientY));
-                        return;
-                    }
-                    finish(box);
-                };
-
-                const onKeyDown = e => {
-                    if (e.code === "Escape") {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        finish(null);
-                    }
-                };
-
-                const onContextMenu = e => {
-                    e.preventDefault();
-                    finish(null);
-                };
-
-                overlay.addEventListener("pointerdown", onDown);
-                overlay.addEventListener("pointermove", onMove);
-                overlay.addEventListener("pointerup", onUp);
-                overlay.addEventListener("contextmenu", onContextMenu);
-                window.addEventListener("keydown", onKeyDown, true);
-                this._cancelPick = () => finish(null);
-            });
-
-            // Clamped to the content area so a drag that leaves the window cannot produce
-            // a region outside what was actually rendered.
-            function normalize(a, b, bounds) {
-                const x1 = Math.max(bounds.left, Math.min(a.x, b.x));
-                const y1 = Math.max(bounds.top, Math.min(a.y, b.y));
-                const x2 = Math.min(bounds.right, Math.max(a.x, b.x));
-                const y2 = Math.min(bounds.bottom, Math.max(a.y, b.y));
-                return { x: x1, y: y1, w: Math.max(0, x2 - x1), h: Math.max(0, y2 - y1) };
-            }
-        }
-
-        /* --------------------------------------------------- click to capture */
-
-        // Asks the page which element is under a chrome-space point, and returns its rect
-        // back in chrome space. Two coordinate hops, both undoing the same page zoom: the
-        // overlay sits exactly over the <browser>, so subtracting its origin and dividing
-        // by fullZoom lands in the page's own CSS pixels, and the reverse comes back.
-        async _elementRect(browser, browserRect, clientX, clientY) {
-            try {
-                const windowGlobal = browser.browsingContext?.currentWindowGlobal;
-                if (!windowGlobal) return null;
-
-                const zoom = browser.fullZoom || 1;
-                const actor = windowGlobal.getActor("ZenEaselCapture");
-                const found = await actor.sendQuery("ZenEaselCapture:ScoreElement", {
-                    x: (clientX - browserRect.left) / zoom,
-                    y: (clientY - browserRect.top) / zoom
-                });
-                if (!found || !(found.w > 0) || !(found.h > 0)) return null;
-
-                const box = {
-                    x: browserRect.left + found.x * zoom,
-                    y: browserRect.top + found.y * zoom,
-                    w: found.w * zoom,
-                    h: found.h * zoom
-                };
-
-                // An element that runs off the top or bottom of the viewport would be
-                // captured as whatever is on screen anyway, so clamp rather than return a
-                // rect the snapshot cannot honour.
-                const x1 = Math.max(browserRect.left, box.x);
-                const y1 = Math.max(browserRect.top, box.y);
-                const x2 = Math.min(browserRect.right, box.x + box.w);
-                const y2 = Math.min(browserRect.bottom, box.y + box.h);
-                if (x2 - x1 < 8 || y2 - y1 < 8) return null;
-
-                return { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
-            } catch (e) {
-                this.log("could not score the element under the pointer:", e.message);
-                return null;
-            }
-        }
-
-        // Hover preview, throttled: one query in flight at a time and at most one per
-        // PREVIEW_INTERVAL_MS. A query per pointermove would be an IPC round trip per
-        // mouse sample, which is a hundred a second on a fast pointer.
-        _previewElement(browser, browserRect, clientX, clientY, callback) {
-            const now = Date.now();
-            if (this._previewBusy || now - (this._previewAt || 0) < PREVIEW_INTERVAL_MS) return;
-            this._previewAt = now;
-            this._previewBusy = true;
-
-            this._elementRect(browser, browserRect, clientX, clientY)
-                .then(callback)
-                .catch(() => callback(null))
-                .finally(() => { this._previewBusy = false; });
-        }
-
-        /* ------------------------------------------------------------ snapshot */
-
-        // Arc's captureFullWindowButtonTapped: the whole viewport, no picker. The card it
-        // produces is live-capable in exactly the same way as a dragged one — its crop is
-        // simply the entire viewport, which the live layer's k = obj.w / frame.w handles
-        // without knowing the difference.
-        async captureFullWindow(browser = gBrowser.selectedBrowser) {
-            if (!browser) return null;
-            const rect = browser.getBoundingClientRect();
-            return this.captureRegion(browser, {
-                x: rect.left, y: rect.top, w: rect.width, h: rect.height
-            }, "fullWindow");
-        }
-
-        async captureRegion(browser, region, type = "partialPage") {
-            const windowGlobal = browser.browsingContext && browser.browsingContext.currentWindowGlobal;
+        // A capture from a region Zen's own screenshot overlay selected.
+        //
+        // Worth knowing if the old picker is ever resurrected from git: this replaced a
+        // captureRegion/_captureLayout pair that took its rect in *chrome* CSS pixels, where
+        // the mod's picker drew it over the browser element, and divided out page zoom on the
+        // way in. Zen's region arrives in *content* CSS pixels, relative to the document and
+        // already zoom-corrected. The two are not interchangeable, and getting it wrong is
+        // invisible: both corrections are no-ops at 100% zoom, which is the version anyone
+        // testing would look at first.
+        //
+        // `payload` is what ZenEaselScreenshotChild sends: { region, scrollMinX, scrollMinY }.
+        async captureContentRegion(browser, payload) {
+            const windowGlobal = browser && browser.browsingContext &&
+                browser.browsingContext.currentWindowGlobal;
             if (!windowGlobal) throw new Error("this page cannot be captured");
 
-            const browserRect = browser.getBoundingClientRect();
-            // Ask for enough resolution that the capture is sharp on a HiDPI display and
-            // at a zoomed-in page; the true scale is measured off the result below.
-            const scale = (window.devicePixelRatio || 1) * (browser.fullZoom || 1);
+            const region = payload && payload.region;
+            if (!region || !(region.width > 0) || !(region.height > 0)) {
+                throw new Error("nothing was selected to capture");
+            }
 
-            // What goes behind the page. Firefox always says white here, which erases a
-            // page Zen is showing through — see capture-backdrop.uc.js. Null means the
-            // feature is off or has no opinion, and white is then exactly what Firefox
-            // would have done.
+            // The whole reason this path does not simply call ScreenshotsUtils.createCanvas,
+            // which hardcodes white in two places and would quietly undo the
+            // transparent-page fix.
             let backdrop = null;
             try {
                 backdrop = window.gZenEaselCaptureBackdrop
@@ -275,52 +73,145 @@
                 console.error("[zen-easel] could not resolve a capture backdrop:", e);
             }
 
-            let bitmap;
+            let canvas;
             try {
-                bitmap = await windowGlobal.drawSnapshot(null, scale, backdrop || WHITE);
+                canvas = await this._snapshotPageRect(windowGlobal, region, backdrop || WHITE);
             } catch (e) {
-                // A backdrop Gecko will not parse must not be the reason a capture fails.
-                // Retried once on white before giving up, so the worst this feature can do
-                // to a capture is leave it looking the way it does today.
                 if (!backdrop) throw new Error("this page refused to be captured");
                 console.warn("[zen-easel] the capture backdrop was refused, " +
                     "retrying on white:", e);
-                try {
-                    bitmap = await windowGlobal.drawSnapshot(null, scale, WHITE);
-                } catch (e2) {
-                    throw new Error("this page refused to be captured");
-                }
+                canvas = await this._snapshotPageRect(windowGlobal, region, WHITE);
             }
-            if (!bitmap) throw new Error("nothing was rendered to capture");
-
-            // Derive the scale from what came back rather than trusting the value we asked
-            // for. This self-corrects for HiDPI and page zoom instead of depending on
-            // getting devicePixelRatio * fullZoom exactly right.
-            const scaleX = bitmap.width / browserRect.width;
-            const scaleY = bitmap.height / browserRect.height;
-
-            const sx = Math.round((region.x - browserRect.left) * scaleX);
-            const sy = Math.round((region.y - browserRect.top) * scaleY);
-            const sw = Math.max(1, Math.round(region.w * scaleX));
-            const sh = Math.max(1, Math.round(region.h * scaleY));
-
-            const canvas = new OffscreenCanvas(sw, sh);
-            const ctx = canvas.getContext("2d");
-            ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, sw, sh);
-            bitmap.close();
 
             const blob = await canvas.convertToBlob({ type: "image/png" });
             const bytes = new Uint8Array(await blob.arrayBuffer());
 
             return {
                 bytes,
-                width: sw,
-                height: sh,
+                width: canvas.width,
+                height: canvas.height,
                 url: browser.currentURI ? browser.currentURI.spec : "",
                 title: this._tabTitle(),
                 favicon: window.gZenEaselHost ? window.gZenEaselHost.localFavicon() : "",
-                capture: await this._captureLayout(browser, region, browserRect, type)
+                capture: await this._contentCaptureLayout(browser, region, payload)
             };
+        }
+
+        // drawSnapshot with an explicit document-space rect, tiled.
+        //
+        // The old picker asked for `null` — the viewport — and cropped what came back, which
+        // was sound only because it drew its rect over the visible browser and so could not
+        // select anything off-screen. Zen's overlay can: scrollIfByEdge scrolls the page
+        // when a drag reaches its edge, so a selection may sit partly or entirely outside the
+        // current viewport by the time it is finished. Cropping a viewport bitmap for one of
+        // those returns whatever happens to be at those coordinates now — silently, with a
+        // picture that looks like a successful capture of the wrong thing.
+        //
+        // The tiling and the flooring below follow ScreenshotsUtils.createCanvas rather than
+        // being re-derived: drawSnapshot refuses a rect past MAX_SNAPSHOT_DIMENSION, and
+        // computing destination offsets any other way leaves seams between the tiles.
+        async _snapshotPageRect(windowGlobal, region, backdrop) {
+            const dpr = region.devicePixelRatio || 1;
+
+            const left = Math.round(region.left);
+            const top = Math.round(region.top);
+            let right = Math.round(region.right);
+            let bottom = Math.round(region.bottom);
+
+            // Gecko will not produce a surface past this, and a refusal here reads as "the
+            // page refused to be captured" rather than as the size problem it is. The limit
+            // is in *device* pixels — cropScreenshotRectIfNeeded multiplies by the ratio
+            // before comparing — so it has to be divided back out before it can clamp a
+            // rect in CSS pixels. Clamping the CSS value directly is a no-op at ratio 1 and
+            // lets through twice the allowed surface at ratio 2, which is an ordinary
+            // Windows display.
+            const limit = Math.max(1, Math.floor(MAX_CAPTURE_DIMENSION / dpr));
+            right = Math.min(right, left + limit);
+            bottom = Math.min(bottom, top + limit);
+
+            const width = Math.max(1, right - left);
+            const height = Math.max(1, bottom - top);
+
+            const canvas = new OffscreenCanvas(
+                Math.floor(width * dpr), Math.floor(height * dpr));
+            const context = canvas.getContext("2d");
+
+            // Fill first, for the same reason Firefox does: rounding can leave device pixel
+            // rows the renderer never covers, and transparent is not what a capture means.
+            context.fillStyle = backdrop;
+            context.fillRect(0, 0, canvas.width, canvas.height);
+
+            for (let x = left; x < right; x += MAX_SNAPSHOT_DIMENSION) {
+                for (let y = top; y < bottom; y += MAX_SNAPSHOT_DIMENSION) {
+                    const tileW = Math.min(MAX_SNAPSHOT_DIMENSION, right - x);
+                    const tileH = Math.min(MAX_SNAPSHOT_DIMENSION, bottom - y);
+
+                    const bitmap = await windowGlobal.drawSnapshot(
+                        new DOMRect(x, y, tileW, tileH), dpr, backdrop);
+                    if (!bitmap) throw new Error("nothing was rendered to capture");
+
+                    context.drawImage(
+                        bitmap,
+                        Math.floor((x - left) * dpr), Math.floor((y - top) * dpr),
+                        Math.floor(tileW * dpr), Math.floor(tileH * dpr));
+                    bitmap.close();
+                }
+            }
+
+            return canvas;
+        }
+
+        // The live-card geometry for a content-space region.
+        //
+        // Deliberately not the old _captureLayout with an extra argument — see the note on
+        // captureContentRegion above. That one subtracted the browser's position and divided
+        // by fullZoom because its input was in chrome pixels; both corrections are wrong for
+        // a content-space region, and neither would be visible at 100% zoom.
+        async _contentCaptureLayout(browser, region, payload, type = "partialPage") {
+            try {
+                const viewport = await this.measureViewport(browser);
+                if (!viewport) return null;
+
+                // Zen normalises page coordinates by subtracting scrollMinX/scrollMinY
+                // (getCoordinatesFromEvent), while webContentOffset is the raw win.scrollX/Y
+                // the measurement actor reports. The two agree on ordinary pages and differ
+                // on RTL and negative-origin ones, so the region goes back into the raw space
+                // before being differenced against the offset.
+                const pageX = Math.round(region.left + (payload.scrollMinX || 0));
+                const pageY = Math.round(region.top + (payload.scrollMinY || 0));
+
+                const frame = {
+                    x: Math.round(pageX - viewport.webContentOffset.x),
+                    y: Math.round(pageY - viewport.webContentOffset.y),
+                    w: Math.round(region.width),
+                    h: Math.round(region.height)
+                };
+
+                // A selection made while the page edge-scrolled can end up outside the
+                // viewport it is being expressed against. The tile restores the recorded
+                // scroll offset and then crops at this rectangle, so an out-of-range one does
+                // not fail — it confidently shows the wrong part of the site. Declining the
+                // geometry means the card simply never offers to go live, which is the same
+                // honest answer measureViewport gives for an inner-scrolling page.
+                const size = viewport.webContentSize;
+                if (frame.x < 0 || frame.y < 0 ||
+                    frame.x + frame.w > size.w || frame.y + frame.h > size.h) {
+                    console.warn("[zen-easel] this selection reaches outside the viewport, " +
+                        "so its scroll position cannot be reproduced; this capture will not " +
+                        "be live-capable");
+                    return null;
+                }
+
+                return {
+                    type,
+                    webContentSize: viewport.webContentSize,
+                    webContentOffset: viewport.webContentOffset,
+                    frameRelativeToViewport: frame
+                };
+            } catch (e) {
+                console.warn("[zen-easel] could not work out the capture layout:", e);
+                return null;
+            }
         }
 
         // What the page was, at the moment the picture was taken: the layout box it was laid
@@ -408,46 +299,6 @@
                 .sendQuery("ZenEaselCapture:Measure");
         }
 
-        // The geometry a live web card needs later: the viewport size and scroll offset at
-        // capture time, plus the selected rect in viewport coordinates. Persisting the
-        // rect rather than a CSS selector is what makes a live card degrade to "the wrong
-        // crop" instead of "broken" when a site is redesigned — the same trade Arc makes.
-        //
-        // Returns null when the measurement is unavailable, which simply means this card
-        // will never offer to go live.
-        async _captureLayout(browser, region, browserRect, type = "partialPage") {
-            try {
-                const viewport = await this.measureViewport(browser);
-                if (!viewport) return null;
-
-                // The overlay is positioned over the <browser>, so the region is already
-                // in the browser's own CSS pixels once the origin is subtracted. Page zoom
-                // is the one scale factor still in the way.
-                const zoom = browser.fullZoom || 1;
-
-                // No correction for the scrollbar gutter here, deliberately. The child
-                // reports the scrollbar-free layout box, which is narrower than the
-                // <browser> — but the gutter is entirely on the trailing edge, so the
-                // content's origin is still the browser rect's top-left and the crop's
-                // coordinates need no shift. What the narrower box changes is the width
-                // the tile lays the page out at, and that is webContentSize's job.
-                return {
-                    type,
-                    webContentSize: viewport.webContentSize,
-                    webContentOffset: viewport.webContentOffset,
-                    frameRelativeToViewport: {
-                        x: Math.round((region.x - browserRect.left) / zoom),
-                        y: Math.round((region.y - browserRect.top) / zoom),
-                        w: Math.round(region.w / zoom),
-                        h: Math.round(region.h / zoom)
-                    }
-                };
-            } catch (e) {
-                console.warn("[zen-easel] could not work out the capture layout:", e);
-                return null;
-            }
-        }
-
         _tabTitle() {
             try {
                 return gBrowser.selectedTab.label || "";
@@ -456,13 +307,11 @@
             }
         }
 
-        destroy() {
-            if (this._cancelPick) this._cancelPick();
-            if (this._overlay) {
-                this._overlay.remove();
-                this._overlay = null;
-            }
-        }
+        // Nothing to tear down since the picker left — this held an overlay element and a
+        // pending selection promise. Kept because every caller pairs construction with it in
+        // a finally block, and because a capture host acquiring state again is likelier than
+        // all of those call sites remembering to add the call back.
+        destroy() { }
     }
 
     window.ZenEaselCaptureHost = ZenEaselCaptureHost;

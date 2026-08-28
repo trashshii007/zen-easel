@@ -71,6 +71,16 @@
                         "chrome://sine/content/zen-easel/background/capture-backdrop.sys.mjs");
                     this._installed = installScreenshotBackdrop();
                     this.log("native screenshot backdrop hooked:", this._installed);
+                    // Not behind the debug pref. A hook that failed to go on means every
+                    // native screenshot silently keeps compositing onto white, and the
+                    // symptom — a blown-out capture — looks identical to the feature being
+                    // switched off, so the one place the difference is visible has to be
+                    // somewhere it will actually be seen.
+                    if (!this._installed) {
+                        console.warn("[zen-easel] Zen's own screenshots could not be hooked " +
+                            "for the capture backdrop; Copy, Download and the Save buttons " +
+                            "will keep compositing onto white");
+                    }
                 } catch (e) {
                     console.error("[zen-easel] could not hook Zen's screenshots for the " +
                         "capture backdrop:", e);

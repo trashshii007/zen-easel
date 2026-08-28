@@ -1,22 +1,9 @@
 <!--
-  Zen Easel's icon, used on all three surfaces that show one: the toolbar button
-  (chrome.css), the about:easel tab (page/easel.xhtml, plus the setIcon call in
-  ZenEaselHost.uc.js), and "Move to easel" in Zen's screenshot preview, which is a
-  <moz-button iconSrc> (screenshot-hook.uc.js).
+  Zen Easel's toolbar button, and nothing else now (chrome.css). Every other surface
+  takes the product mark in zen-easel-board.svg.
 
-  The lines are stroked with `context-fill`, not `context-stroke`, and that is the
-  whole reason one file can serve all three. The tab strip declares
-  `-moz-context-properties: fill, stroke` and then only ever sets `fill`
-  (browser/skin/classic/browser/tabbrowser/tabs.css), so `stroke` keeps its initial
-  value of `none`. A context-stroke icon therefore loads, takes up its 16px and
-  paints nothing at all — which reads as a tab with no icon rather than as a broken
-  one, and is what this file used to do.
-
-  Painting strokes with the context's *fill* colour is Zen's own convention for line
-  icons; see the seventeen files in chrome/browser/skin/classic/browser/zen-icons
-  that do exactly this, down to the round caps and the ~1.5 stroke width. Following
-  it means the icon tracks the theme and dims with inactive tabs the way every other
-  tab icon does, instead of committing to one colour that has to survive both.
+  The lines are stroked with `context-fill`, not `context-stroke`; zen-easel-board.svg's
+  header sets out why, and it holds for the toolbar button too.
 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" width="20" height="20"
      fill="none" stroke="context-fill" stroke-opacity="context-fill-opacity"
