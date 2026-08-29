@@ -33,6 +33,7 @@
         "snap-to-grid": ["bool", false],
         "wheel": ["str", "zoom"],
         "ink-style": ["str", "variable"],
+        "hide-topbar": ["bool", false],
         "autosave-ms": ["int", 500],
         "debug": ["bool", false],
         "live.enabled": ["bool", true],
@@ -45,6 +46,9 @@
         "live.private": ["bool", false],
         "capture-backdrop": ["str", "auto"]
     };
+    // zen.easel.favorites is deliberately not here. It is a store rather than a setting — the
+    // picker writes it on a right-click — so it is read through prefStr at the moment it is
+    // needed instead of riding in a cache that only exists to keep hot paths off XPCOM.
 
     const prefs = Object.create(null);
 
@@ -58,12 +62,21 @@
 
     for (const name in PREF_SPEC) readPref(name);
 
-    // A branch observer rather than one per pref: the topic carries the leaf name, so a
-    // single registration keeps the cache honest and toggling a pref takes effect
-    // immediately.
+    // A branch observer rather than one per pref: one registration keeps the whole cache honest
+    // and toggling a pref takes effect immediately.
+    //
+    // The name arrives relative to the branch the observer was registered *on*, and this is
+    // registered on Services.prefs — the root branch — so what turns up is the full
+    // "zen.easel.grid", not the "grid" that PREF_SPEC is keyed by. Testing the raw value against
+    // PREF_SPEC therefore matched nothing, and the cache sat at whatever it read at startup for
+    // the life of the window: editing any zen.easel pref did nothing until the next restart, and
+    // the picker's favourites were lost the moment they were written. Stripped rather than
+    // assumed, so this stays correct if it is ever moved onto a branch of its own.
     const prefObserver = {
         observe(_subject, _topic, data) {
-            if (data in PREF_SPEC) readPref(data);
+            const name = String(data || "");
+            const leaf = name.startsWith(PREF_BRANCH) ? name.slice(PREF_BRANCH.length) : name;
+            if (leaf in PREF_SPEC) readPref(leaf);
         }
     };
     Services.prefs.addObserver(PREF_BRANCH, prefObserver);
@@ -110,36 +123,6 @@
             }
         };
         return throttled;
-    }
-
-    /* -------------------------------------------------------------- shortcuts */
-
-    // "Ctrl+Shift+E" -> { ctrl, alt, shift, code }. Matching is done on e.code so the
-    // binding survives non-QWERTY layouts, which is why the key half is translated to a
-    // KeyX / DigitX / FX code up front rather than compared against e.key.
-    function parseShortcut(str) {
-        const parts = String(str || "").split("+").map(p => p.trim()).filter(Boolean);
-        const spec = { ctrl: false, alt: false, shift: false, code: null };
-        for (const part of parts) {
-            const lower = part.toLowerCase();
-            if (lower === "ctrl" || lower === "control") spec.ctrl = true;
-            else if (lower === "alt" || lower === "option") spec.alt = true;
-            else if (lower === "shift") spec.shift = true;
-            else if (lower === "cmd" || lower === "meta" || lower === "command") spec.ctrl = true; // Windows: fold Cmd onto Ctrl
-            else if (/^[a-z]$/i.test(part)) spec.code = "Key" + part.toUpperCase();
-            else if (/^[0-9]$/.test(part)) spec.code = "Digit" + part;
-            else if (/^f([1-9]|1[0-2])$/i.test(part)) spec.code = "F" + part.slice(1);
-        }
-        return spec.code ? spec : null;
-    }
-
-    function matchesShortcut(e, spec) {
-        return !!spec &&
-            e.code === spec.code &&
-            e.ctrlKey === spec.ctrl &&
-            e.altKey === spec.alt &&
-            e.shiftKey === spec.shift &&
-            !e.metaKey;
     }
 
     /* ------------------------------------------------------------ DOM helper */
@@ -198,7 +181,7 @@
     }
 
     window.ZenEaselUtil = {
-        el, svg, log, parseShortcut, matchesShortcut, throttleRAF,
+        el, svg, log, throttleRAF,
         // Cached, observer-backed. Read these in hot paths; the prefBool/prefInt/prefStr
         // functions below go through XPCOM and are for one-off reads only.
         prefs,

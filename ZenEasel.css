@@ -17,7 +17,12 @@
      _applyBackground from the active preset; --easel-solid is the same colour opaque,
      for the handful of things that cannot be see-through; --easel-bg is the tint the
      "Follow theme" board paints, and the fallback until the first _applyBackground
-     runs. Every board is a tint over Zen's window, so these carry alpha by design. */
+     runs. Every board is a tint over Zen's window, so these carry alpha by design.
+
+     These describe the *board*, and nothing in the easel's chrome reads them any more —
+     the panels wear --easel-chrome-tint below. What is left is the canvas: the floating
+     card bar borrows --easel-tint, and the renderer paints card bodies with --easel-solid,
+     both of which sit on the board and would be holes onto it in any other colour. */
   --easel-tint: 251, 251, 250;
   /* Not light-dark(): the renderer reads this one through getComputedStyle to paint on
      a canvas, and an unregistered custom property hands back the literal token rather
@@ -33,11 +38,19 @@
   --easel-bg: light-dark(rgba(251, 251, 250, 0.44), rgba(27, 27, 29, 0.50));
   --easel-grid: light-dark(rgba(0, 0, 0, 0.11), rgba(255, 255, 255, 0.10));
 
-  /* Chrome — topbar, toolbar, popups, menus — is the board's colour at a heavier
-     alpha, so it reads as part of the same surface instead of a grey strip parked on
-     top of it. It has to stay well clear of the board's own alpha: these hold text and
-     controls, and whatever wallpaper is behind them must not compete with a label. */
-  --easel-panel: rgba(var(--easel-tint), 0.82);
+  /* Chrome — topbar, toolbar, popups, menus — wears Zen's *workspace* colour at a heavier
+     alpha, written by _syncZenColors, so the easel's panels read as part of the browser
+     rather than as a grey strip parked on top of it. It used to be the board's own colour,
+     which meant dragging the background slider dragged every panel with it and flipped them
+     light/dark mid-gesture. The values below are the fallback for a page with no chrome
+     window to read. The alpha has to stay well clear of the board's: these hold text and
+     controls, and whatever is behind them must not compete with a label. */
+  --easel-chrome-tint: 251, 251, 250;
+  /* The same surface opaque, for the three rings that cannot be see-through — a swatch's
+     active ring, the slider thumb's border and the wheel handle all need the panel's own
+     colour behind them or they merge with what they are ringing. */
+  --easel-chrome-solid: #fbfbfa;
+  --easel-panel: rgba(var(--easel-chrome-tint), 0.82);
   --easel-panel-border: light-dark(rgba(0, 0, 0, 0.10), rgba(255, 255, 255, 0.12));
   --easel-text: light-dark(#1f1f1f, #ededed);
   --easel-muted: light-dark(rgba(0, 0, 0, 0.52), rgba(255, 255, 255, 0.52));
@@ -69,41 +82,55 @@
   :host {
     --easel-tint: 27, 27, 29;
     --easel-solid: #1b1b1d;
+    --easel-chrome-tint: 27, 27, 29;
+    --easel-chrome-solid: #1b1b1d;
     --easel-handle: #40404a;
   }
 }
 
-/* The chrome's ink follows the *board*, not the OS: a Slate board under a light system
-   theme still needs light text on it, and light-dark() cannot say so because it is
-   answering a different question. _applyBackground writes data-easel-ink once it knows
-   which board is open; until then the light-dark() values above stand, which is the
-   right answer for the "Follow theme" board an easel starts on. */
-:host([data-easel-ink="light"]) {
+/* The chrome's ink follows the *panel surface*, not the OS: Zen's workspace colour can be
+   dark under a light system theme and light under a dark one, and light-dark() cannot say
+   so because it is answering a different question. _syncZenColors writes this once it has
+   resolved that surface; until then the light-dark() values above stand. */
+:host([data-easel-chrome-ink="light"]) {
   --easel-panel-border: rgba(0, 0, 0, 0.10);
   --easel-text: #1f1f1f;
   --easel-muted: rgba(0, 0, 0, 0.52);
   --easel-hover-bg: rgba(0, 0, 0, 0.06);
   --easel-active-bg: rgba(0, 0, 0, 0.11);
   --easel-tool-ink: #4a4458;
-  /* White clears every light board — Arc #FAFAFC, Paper #F6F2E9, Mist #E9EDF1 — so a
-     grip always sits above the surface it is resizing. */
-  --easel-handle: #ffffff;
+  /* The "Follow theme" board, and the only board these blocks have any say over. It follows
+     Zen rather than the OS for the reason its name implies: a light workspace under a dark
+     system theme should still open on a pale board. The light-dark() default above is what
+     stands when there is no browser window to ask. */
+  --easel-bg: rgba(251, 251, 250, 0.44);
 }
 
-:host([data-easel-ink="dark"]) {
+:host([data-easel-chrome-ink="dark"]) {
   --easel-panel-border: rgba(255, 255, 255, 0.13);
   --easel-text: #ededed;
   --easel-muted: rgba(255, 255, 255, 0.55);
   --easel-hover-bg: rgba(255, 255, 255, 0.10);
   --easel-active-bg: rgba(255, 255, 255, 0.17);
   --easel-tool-ink: #d6d2e0;
-  /* A dark tint over a bright wallpaper needs more body than a light one over the same
+  /* A dark panel over a bright wallpaper needs more body than a light one over the same
      wallpaper: light text on a half-lit dark panel is the pairing that goes first. */
-  --easel-panel: rgba(var(--easel-tint), 0.88);
-  /* Lifted, not white. White grips would be the only light-scheme thing left on a dark
-     board once the chrome has flipped, and they read as glare against Ink or Black.
-     This clears the darkest board it has to sit on — Slate #2A2E35 — by enough to be a
-     disc rather than a hole, and the accent ring carries the rest. */
+  --easel-panel: rgba(var(--easel-chrome-tint), 0.88);
+  --easel-bg: rgba(27, 27, 29, 0.50);
+}
+
+/* The board's own ink, which is a different question from the chrome's: the grips are
+   painted *on the board*, so they follow it rather than Zen. _applyBackground writes this. */
+:host([data-easel-ink="light"]) {
+  /* White clears every light board — Arc #FAFAFC, Paper #F6F2E9, Mist #E9EDF1 — so a
+     grip always sits above the surface it is resizing. */
+  --easel-handle: #ffffff;
+}
+
+:host([data-easel-ink="dark"]) {
+  /* Lifted, not white. White grips read as glare against Ink or Black. This clears the
+     darkest board it has to sit on — Slate #2A2E35 — by enough to be a disc rather than a
+     hole, and the accent ring carries the rest. */
   --easel-handle: #40404a;
 }
 
@@ -125,11 +152,11 @@
 
 /* ------------------------------------------------------------------- topbar */
 
-/* Wears the board's colour. --easel-panel is the active board's tint at a heavier
-   alpha, so switching from Paper to Ink carries the bar with it instead of leaving a
-   grey strip sitting on a dark board — and because it keeps an alpha, the wallpaper
-   behind Zen still reads through the whole window rather than stopping at the bar.
-   The transition is what makes a board change read as one move. */
+/* Wears Zen's workspace colour at a heavier alpha, like every other panel here, so the bar
+   reads as part of the browser rather than as a grey strip — and because it keeps an alpha,
+   the wallpaper behind Zen still reads through the whole window rather than stopping at the
+   bar. It deliberately does *not* follow the board: the background is a slider now, and a
+   topbar that tracked it would change colour under the pointer mid-drag. */
 .easel-topbar {
   flex: none;
   display: flex;
@@ -143,6 +170,9 @@
   transition: background 260ms var(--easel-ease), color 260ms var(--easel-ease);
   z-index: 3;
 }
+
+/* zen.easel.hide-topbar: display:none so the bar is out of the flow and measures 0×0, which is what the live layer reads for its holes. */
+:host([data-easel-topbar="hidden"]) .easel-topbar { display: none; }
 
 .easel-topbar-left {
   position: relative;
@@ -320,6 +350,20 @@
 
 .easel-list[hidden] { display: none; }
 
+/* The same list inside the context menu's Easels flyout, where the popup already carries the frame. */
+.easel-list.is-inline {
+  position: static;
+  min-width: 220px;
+  max-height: 50vh;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  backdrop-filter: none;
+  animation: none;
+}
+
 .easel-list-item,
 .easel-list-action {
   display: flex;
@@ -369,6 +413,10 @@
   transition: background-color 260ms var(--easel-ease);
   cursor: default;
 }
+
+/* A background drag writes a colour per pointermove, and 260ms of easing on each one reads as
+   the board smearing along behind the thumb. Set while a wheel or slider gesture is in flight. */
+.easel-viewport[data-easel-live-bg] { transition: none; }
 
 .easel-viewport[data-tool="text"] { cursor: text; }
 .easel-viewport[data-tool="pen"],
@@ -572,30 +620,196 @@
   animation: easel-rise 160ms var(--easel-ease) both;
 }
 
-.easel-popup-swatches {
-  display: grid;
-  grid-template-columns: repeat(5, 22px);
-  justify-content: center;
-  gap: 7px;
+/* ------------------------------------------------------------- colour panel */
+
+/* Compact: the wheel and its readouts share one row, everything else stacks under them.
+   Sized so the eleven-swatch standard row fits on one line without the panel needing more
+   window than the toolbar has beside it. */
+.easel-color-panel {
+  display: flex;
+  flex-direction: column;
+  width: 274px;
+  /* A panel taller than the window scrolls rather than losing its top. The clamp in _showPopup
+     pins it to the viewport floor once it cannot fit, and there is nothing above a floating
+     popup to scroll it back into view — so the overflow has to be its own. overflow-x is
+     clipped rather than left to follow: `auto` on one axis blockifies `visible` on the other,
+     and a swatch growing 1.4px under the pointer would raise a horizontal scrollbar. */
+  max-height: calc(100vh - 120px);
+  overflow-y: auto;
+  overflow-x: clip;
 }
 
-.easel-swatch {
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  border: 1px solid var(--easel-panel-border);
+/* stretch, not flex-start: it is what gives the readout column the wheel's own height, which
+   is what lets Brightness sit on the wheel's lower edge rather than floating under the RGB. */
+.easel-color-top {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+}
+
+.easel-color-readouts {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+/* Section captions, and the slider labels, are the same voice — small, muted, not competing
+   with the colours they are naming. */
+.easel-panel-label {
+  font-size: 11px;
+  color: var(--easel-muted);
+}
+
+/* Hue is the angle and saturation the radius, so the two gradients stack: a conic wheel from
+   +x running counter-clockwise, and a white centre fading out. The ::after veil is value —
+   painting black over the whole disc is what a brightness slider does to an HSV wheel. */
+.easel-wheel {
+  position: relative;
+  flex: none;
+  width: 130px;
+  height: 130px;
   border-radius: 50%;
-  background: var(--swatch);
-  cursor: pointer;
-  transition: transform 120ms var(--easel-ease), box-shadow 120ms var(--easel-ease);
+  box-shadow: 0 0 0 1px var(--easel-panel-border) inset;
+  cursor: crosshair;
+  touch-action: none;
+  background:
+    radial-gradient(circle closest-side, #fff, rgba(255, 255, 255, 0) 100%),
+    conic-gradient(from 90deg,
+      #f00, #f0f, #00f, #0ff, #0f0, #ff0, #f00);
 }
 
-.easel-swatch:hover { transform: scale(1.14); }
-/* The inner ring is the gap between the swatch and the accent ring, so it has to be
-   opaque — the tinted --easel-panel would show the swatch straight through it and the
-   two rings would merge. --easel-solid is the same colour the popup is wearing. */
-.easel-swatch.is-active {
-  box-shadow: 0 0 0 2px var(--easel-solid), 0 0 0 4px var(--easel-accent);
+.easel-wheel::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: #000;
+  opacity: calc(1 - var(--easel-wheel-v, 1));
+  pointer-events: none;
+}
+
+/* Translated onto its own centre so the coordinates the picker writes are the point itself.
+   Ringed in the panel's own colour, not --easel-handle: that one follows the *board*, and this
+   handle is sitting on a wheel inside a panel that follows Zen — a dark board under light
+   chrome would have put a near-black ring on a bright wheel. */
+.easel-wheel-handle {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--easel-chrome-solid);
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.easel-hex-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.easel-hex-field {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 7px;
+  border: 1px solid var(--easel-panel-border);
+  border-radius: 7px;
+  background: var(--easel-hover-bg);
+  color: var(--easel-text);
+  font: inherit;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  box-sizing: border-box;
+}
+
+.easel-hex-field:focus-visible {
+  outline: none;
+  border-color: var(--easel-accent);
+  box-shadow: 0 0 0 3px var(--easel-accent-soft);
+}
+
+.easel-color-preview {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  box-shadow: 0 0 0 1px var(--easel-panel-border) inset;
+}
+
+.easel-rgb-readout {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--easel-text);
+}
+
+/* Both sliders, stacked under the RGB readout rather than taking a full-width row each at the
+   foot of the panel. The group is pushed to the bottom of the column so the first one lines up
+   against the wheel's lower edge, which is what keeps the panel compact. */
+.easel-slider-stacks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: auto;
+  padding-top: 6px;
+}
+
+.easel-slider-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+/* The caption carries the label and, where there is one, the readout — side by side, because
+   the column is too narrow to give each of them a line. */
+.easel-slider-caption {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+/* The column sets the width here, not the control: the 88px floor is for a full-width row. */
+.easel-slider-stack .easel-slider { min-width: 0; }
+
+.easel-swatch-section {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px solid var(--easel-panel-border);
+}
+
+/* Recently used and Favourites, paired. Both hold the same fixed number of slots, so they are
+   the same width. The separator belongs to the pair rather than to each of them, or it would
+   arrive as two rules with a gap bitten out of the middle. */
+.easel-swatch-columns {
+  display: flex;
+  gap: 14px;
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px solid var(--easel-panel-border);
+}
+
+.easel-swatch-columns .easel-swatch-section {
+  flex: 1;
+  min-width: 0;
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+
+/* The flyout branching off a board-menu item. The menu layer is pointer-events: none and
+   only .easel-menu opts back in, so this has to say so too or it would be inert. */
+.easel-popup.is-flyout {
+  bottom: auto;
+  pointer-events: auto;
+  animation: easel-pop 130ms var(--easel-ease) both;
+  transform-origin: top left;
 }
 
 .easel-popup-widths {
@@ -629,27 +843,9 @@
   background: var(--easel-text);
 }
 
-/* The opacity row. A slider rather than preset stops, because the value anyone actually
-   wants is "a bit fainter than that" — see _opacityRow in tools.uc.js. Separated from the
-   widths by the same rule the widths are separated from the swatches, so the popup reads
-   as three settings rather than one long list. */
-.easel-popup-opacity {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 9px;
-  padding-top: 9px;
-  border-top: 1px solid var(--easel-panel-border);
-}
-
-.easel-opacity-label {
-  font-size: 11px;
-  color: var(--easel-muted);
-}
-
 /* Tabular figures and a fixed width, so the popup does not twitch sideways as the
    readout goes from 100% to 95% and back while the thumb is being dragged. */
-.easel-opacity-value {
+.easel-slider-value {
   min-width: 34px;
   font-size: 11px;
   font-variant-numeric: tabular-nums;
@@ -660,7 +856,7 @@
 /* Built from parts rather than left to the platform: the native range widget is styled
    from the OS theme and ignores the panel it is sitting in, which reads as a piece of a
    different application inside a popup that is otherwise all Arc. */
-.easel-opacity-slider {
+.easel-slider {
   flex: 1;
   min-width: 88px;
   height: 18px;
@@ -671,28 +867,28 @@
   cursor: pointer;
 }
 
-.easel-opacity-slider::-moz-range-track {
+.easel-slider::-moz-range-track {
   height: 4px;
   border-radius: 2px;
   background: var(--easel-panel-border);
 }
 
-.easel-opacity-slider::-moz-range-progress {
+.easel-slider::-moz-range-progress {
   height: 4px;
   border-radius: 2px;
   background: var(--easel-accent);
 }
 
-.easel-opacity-slider::-moz-range-thumb {
+.easel-slider::-moz-range-thumb {
   width: 13px;
   height: 13px;
-  border: 2px solid var(--easel-solid);
+  border: 2px solid var(--easel-chrome-solid);
   border-radius: 50%;
   background: var(--easel-accent);
 }
 
-.easel-opacity-slider:focus-visible { outline: none; }
-.easel-opacity-slider:focus-visible::-moz-range-thumb {
+.easel-slider:focus-visible { outline: none; }
+.easel-slider:focus-visible::-moz-range-thumb {
   box-shadow: 0 0 0 3px var(--easel-accent-soft);
 }
 
@@ -925,15 +1121,17 @@
   background: var(--easel-panel-border);
 }
 
-.easel-menu-swatches {
+/* No max-width. There is no box-sizing reset here, so a swatch is 20px across the border
+   box, and the eleven-colour standard row needs 270px — a cap tuned for the old context
+   menu wrapped it after nine and left two orphans on a second line. */
+.easel-swatch-row {
   display: flex;
   flex-wrap: wrap;
   gap: 5px;
-  padding: 5px 8px 2px;
-  max-width: 220px;
+  padding: 3px 0;
 }
 
-.easel-menu-swatch {
+.easel-swatch {
   width: 18px;
   height: 18px;
   padding: 0;
@@ -941,15 +1139,18 @@
   border-radius: 50%;
   background: var(--swatch);
   cursor: pointer;
+  transition: transform 120ms var(--easel-ease), box-shadow 120ms var(--easel-ease);
 }
 
+.easel-swatch:hover { transform: scale(1.14); }
+
 /* "Follow theme" has no colour of its own — show it as a split light/dark disc. */
-.easel-menu-swatch.is-theme {
+.easel-swatch.is-theme {
   background: linear-gradient(135deg, #fbfbfa 0 50%, #1b1b1d 50% 100%);
 }
 
-.easel-menu-swatch.is-active {
-  box-shadow: 0 0 0 2px var(--easel-solid), 0 0 0 3.5px var(--easel-accent);
+.easel-swatch.is-active {
+  box-shadow: 0 0 0 2px var(--easel-chrome-solid), 0 0 0 3.5px var(--easel-accent);
 }
 
 /* -------------------------------------------------------------------- error */

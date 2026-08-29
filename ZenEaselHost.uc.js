@@ -7,8 +7,7 @@
 //
 // The easel itself is a document now — about:easel, in its own tab. What stays behind in
 // browser.xhtml is only what genuinely cannot live in a page: taking a snapshot of
-// whatever tab you are looking at, hooking Zen's own screenshot UI, the toolbar button,
-// and the global shortcut.
+// whatever tab you are looking at, hooking Zen's own screenshot UI, and the toolbar button.
 //
 // Everything this exposes to the page goes through gZenEaselHost, and every value that
 // crosses is a plain string, number or byte array. The page holds a reference to this
@@ -31,8 +30,8 @@
     ];
 
     // Sine re-runs this script on every browser window, and on every rebuild while
-    // developing. Tear the previous instance down first or we leak a window-level keydown
-    // listener and a CustomizableUI widget per reload.
+    // developing. Tear the previous instance down first or we leak a window-level unload
+    // listener, the screenshot hook and a CustomizableUI widget per reload.
     if (window.gZenEaselHost && typeof window.gZenEaselHost.destroy === "function") {
         try { window.gZenEaselHost.destroy(); } catch (e) { console.error("[zen-easel] destroy failed:", e); }
         try { window.ZenEaselUtil.disposePrefs(); } catch (e) { }
@@ -48,7 +47,7 @@
         }
     }
 
-    const { log, prefStr, parseShortcut, matchesShortcut } = window.ZenEaselUtil;
+    const { log } = window.ZenEaselUtil;
 
     // The about: page is the front door. If registration failed — a Zen update changing
     // nsIAboutModule, say — the same file is still reachable at its chrome URL, so the
@@ -72,20 +71,12 @@
 
     class ZenEaselHost {
         constructor() {
-            this._onKeyDown = this._onKeyDown.bind(this);
             this._onUnload = this._onUnload.bind(this);
-
-            this._shortcuts = {
-                open: parseShortcut(prefStr("zen.easel.shortcut.new", "Ctrl+Shift+E")),
-                capture: parseShortcut(prefStr("zen.easel.shortcut.capture", "Ctrl+Shift+2"))
-            };
-
             this._init();
         }
 
         _init() {
             try {
-                window.addEventListener("keydown", this._onKeyDown, true);
                 window.addEventListener("unload", this._onUnload, { once: true });
 
                 // Adds "Easel" to Zen's region bar and screenshot preview. Lives here rather
@@ -349,47 +340,6 @@
             return this.openEasel(entry.id);
         }
 
-        /* --------------------------------------------------------------- input */
-
-        _onKeyDown(e) {
-            // The easel owns its own keyboard now that it is a document. All this window
-            // still handles is getting there, and starting a capture from a normal page.
-            if (matchesShortcut(e, this._shortcuts.open)) {
-                e.preventDefault();
-                e.stopPropagation();
-                this.openEasel();
-                return;
-            }
-            if (matchesShortcut(e, this._shortcuts.capture)) {
-                e.preventDefault();
-                e.stopPropagation();
-                this.startCapture();
-            }
-        }
-
-        // Starts Zen's own screenshot overlay, which now carries an "Easel" button on the
-        // bar it shows under a dragged region. This used to open a region picker of the
-        // mod's own; there is no reason to have two, and Zen's has element highlighting and
-        // resize handles that this one never grew.
-        //
-        // Notifying the observer directly rather than calling ScreenshotsUtils.notify(), and
-        // the difference is not stylistic: notify() reads window.event.currentTarget.
-        // documentGlobal, which only resolves from a command handler where currentTarget is
-        // the document. This runs from a keydown listener bound on the window, where
-        // documentGlobal is undefined and ScreenshotsUtils.observe() then dies destructuring
-        // gBrowser off it. The observer wants the window, so it is handed the window.
-        //
-        // "Shortcut" is the telemetry label Zen's own keybinding uses, and the topic keeps
-        // notify()'s toggle behaviour: pressing it again while the overlay is up cancels.
-        startCapture() {
-            try {
-                Services.obs.notifyObservers(window, "menuitem-screenshot", "Shortcut");
-            } catch (e) {
-                console.error("[zen-easel] could not start a screenshot:", e);
-                this.toast("Could not start a screenshot");
-            }
-        }
-
         /* ------------------------------------------------------------- capture */
 
         // captureRegion and captureFullWindow used to live here, each standing up the mod's
@@ -607,7 +557,6 @@
         // for the whole application, so destroying it because one window closed would take
         // the button away from every other open window.
         destroy({ widget = true } = {}) {
-            window.removeEventListener("keydown", this._onKeyDown, true);
             window.removeEventListener("unload", this._onUnload);
             if (this.screenshotHook) {
                 this.screenshotHook.destroy();

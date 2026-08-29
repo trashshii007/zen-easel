@@ -30,7 +30,6 @@ Requires [Sine](https://github.com/CosmoCreeper/Sine) and [Zen Library](https://
 
 ## Opening a board
 
-- `Ctrl+Shift+E`
 - Toolbar button
 - **Easels** section in Zen Library
 
@@ -44,7 +43,6 @@ Drag a region first, then choose where it goes.
 
 - Screenshot → drag a region → **Easel** on the bar beside Copy and Download
 - Save visible/full page → **Easel** in the preview
-- `Ctrl+Shift+2` opens Zen's own screenshot overlay
 
 Picking **Easel** opens a menu of your boards, most recently used first, plus *New Easel*.
 

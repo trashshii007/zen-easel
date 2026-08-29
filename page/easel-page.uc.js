@@ -26,6 +26,8 @@
 
     const { el, log } = window.ZenEaselUtil;
 
+    const TOPBAR_PREF = "zen.easel.hide-topbar";
+
     /* ------------------------------------------------------------ the element */
 
     class ZenEaselElement extends HTMLElement {
@@ -90,6 +92,7 @@
                 this.shadowRoot.appendChild(root);
 
                 this._syncZenColors();
+                this._watchTopbarPref();
 
                 this.store = new window.ZenEaselStore(this);
                 this.renderer = new window.ZenEaselRenderer(this, {
@@ -254,8 +257,19 @@
             else this._syncTabIdentity();
         }
 
-        // Zen's theme lives in the browser window, not in this document, so the handful
-        // of values the easel borrows are copied across once at startup.
+        // Zen's theme lives in the browser window, not in this document, so the values the
+        // easel's chrome is built from are copied across.
+        //
+        // The easel's panels used to be the *board's* colour at a heavier alpha, which meant
+        // dragging the background slider dragged the toolbar and the menus with it — and at low
+        // board alpha they flipped light/dark mid-gesture. The chrome follows Zen's workspace
+        // theme instead, so it stays put whatever the board is doing. Only the board itself,
+        // the grid and the canvas-painted card chrome still follow the background.
+        //
+        // Custom properties are read through a probe rather than off the root: getPropertyValue
+        // hands back a custom property as authored, so a Zen colour written as light-dark() or
+        // color-mix() would come back as a token string nothing here can parse. Resolving it as
+        // a real background-color is what turns it into rgb().
         _syncZenColors() {
             const chrome = this.chromeWindow;
             if (!chrome) return;
@@ -266,11 +280,75 @@
                     if (v && v.trim()) this.style.setProperty(to, v.trim());
                 };
                 copy("--zen-primary-color", "--easel-accent");
-                copy("--zen-hover-background", "--easel-hover");
-                copy("--zen-colors-border", "--easel-border");
+
+                // finally, because this element is in the *browser window's* document, not in
+                // this page — an exception between the append and the remove would leave it
+                // there, and this runs on every tab foreground, so it would be one orphan per
+                // switch for the life of the window.
+                const probe = chrome.document.createElement("div");
+                let surface;
+                try {
+                    probe.style.cssText =
+                        "position:fixed;top:-9999px;width:0;height:0;pointer-events:none;" +
+                        "background-color:var(--zen-colors-tertiary, var(--zen-main-browser-background, Field))";
+                    chrome.document.documentElement.appendChild(probe);
+                    surface = chrome.getComputedStyle(probe).backgroundColor;
+                } finally {
+                    probe.remove();
+                }
+
+                const Objects = window.ZenEaselObjects;
+                const rgb = Objects.rgbOf(surface);
+                if (!rgb) return;
+
+                this.style.setProperty("--easel-chrome-tint", rgb.join(", "));
+                this.style.setProperty("--easel-chrome-solid", `rgb(${rgb.join(", ")})`);
+                // Which ink the chrome takes, decided the same way the board decides its own —
+                // and it has to be decided here, because light-dark() answers a question about
+                // the OS scheme rather than about the surface these panels are actually wearing.
+                const ink = Objects.luminanceOf(surface) > 0.45 ? "light" : "dark";
+                if (this.getAttribute("data-easel-chrome-ink") === ink) return;
+                this.setAttribute("data-easel-chrome-ink", ink);
+
+                // A "Follow theme" board follows *this* switch, so a theme that moved while the
+                // tab was away has to be pushed through the board as well. Absent on the first
+                // call, which runs before there is a canvas to tell.
+                this.canvas?._applyBackground();
+                this.canvas?.invalidate();
             } catch (e) {
                 log("could not read Zen's theme:", e.message);
             }
+        }
+
+        /* --------------------------------------------------------------- topbar */
+
+        // Read from the pref rather than util's cache: the two observers fire in no
+        // particular order, so the cache may still hold the old value here.
+        get topbarHidden() {
+            return window.ZenEaselUtil.prefBool(TOPBAR_PREF, false);
+        }
+
+        _watchTopbarPref() {
+            this._topbarObserver = { observe: () => this._syncTopbar() };
+            Services.prefs.addObserver(TOPBAR_PREF, this._topbarObserver);
+            this._syncTopbar();
+        }
+
+        // Hiding the bar takes the switcher with it, so the board list moves into the
+        // canvas' context menu — see tools' _openEaselPanel.
+        _syncTopbar() {
+            const hidden = this.topbarHidden;
+            if ((this.getAttribute("data-easel-topbar") === "hidden") === hidden) return;
+
+            if (hidden) this.setAttribute("data-easel-topbar", "hidden");
+            else this.removeAttribute("data-easel-topbar");
+
+            // A popup hanging off a bar that has just gone would be left with no anchor.
+            if (hidden) {
+                this.library?.closeList();
+                this.library?.closeCensus();
+            }
+            this.chromeChanged();
         }
 
         /* --------------------------------------------------------------- bridge */
@@ -315,6 +393,10 @@
         }
 
         teardown() {
+            if (this._topbarObserver) {
+                try { Services.prefs.removeObserver(TOPBAR_PREF, this._topbarObserver); } catch (e) { }
+                this._topbarObserver = null;
+            }
             for (const part of [
                 this.live, this.media, this.textEditor, this.textControls, this.shapeControls,
                 this.canvas,
@@ -470,6 +552,9 @@
                 // Re-attaches as well as repainting: a tab switch never runs setDocument, so
                 // without this nothing would ever put the view back onto its board.
                 try { this.element?.live?.foreground(); } catch (e) { console.error(e); }
+                // Zen's theme may have moved while this board was away — switching workspace is
+                // the usual way — and nothing in this document would otherwise say so.
+                try { this.element?._syncZenColors(); } catch (e) { console.error(e); }
             }
         }
 

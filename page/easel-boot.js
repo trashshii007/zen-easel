@@ -29,6 +29,7 @@
     const MODULES = [
         "modules/util.uc.js",
         "modules/objects.uc.js",
+        "modules/color-picker.uc.js",
         "modules/freehand.uc.js",
         "modules/guides.uc.js",
         "modules/renderer.uc.js",

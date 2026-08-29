@@ -27,8 +27,8 @@ enforces that rather than leaving it to convention.
 
 ## Using it
 
-Open an easel with **Ctrl+Shift+E**, the toolbar button, or the **Easels** section of
-the Zen Library (the button beside the workspace indicator in the sidebar).
+Open an easel with the toolbar button, or from the **Easels** section of the Zen Library
+(the button beside the workspace indicator in the sidebar).
 
 Every easel opens with a **centred heading** at the top, ready to type into. It is a real
 text box — move it, restyle it, colour it — and it *is* the easel's name: rename it here
@@ -41,7 +41,7 @@ Captures always keep the source URL, so double-clicking a card later takes you b
 the page it came from. The shape is always the same — take the picture first, then say
 where it goes — and there are two ways in:
 
-- **A dragged region.** Zen's screenshot button, or **Ctrl+Shift+2**. Drag a selection
+- **A dragged region.** Zen's own screenshot button or keybinding. Drag a selection
   and the bar that appears under it carries **Easel** beside Copy and Download.
 - **After *Save visible page* or *Save full page*.** The preview that follows has an
   **Easel** button beside Copy and Download.
@@ -121,33 +121,75 @@ the middle of the view either way.
 The toolbar sits at the **bottom left**, as Arc's does. Colour, stroke width and opacity
 share one button at its right-hand end: the dot shows the current colour, its size shows
 the current stroke width, and how far through it you can see is the current opacity.
-Number keys `1`–`9` and `0` pick the first ten palette colours directly; the eleventh is
-in the swatch popup. All of these apply to the selection as well as setting the default —
-see **Palettes** and **Opacity**.
+Number keys `1`–`9` and `0` pick the first ten standard colours directly; the eleventh is
+in the picker. All of these apply to the selection as well as setting the default —
+see **Colour** and **Opacity**.
 
-### Palettes
+### Colour
 
-There are **eleven colours**, in two palettes — **Vibrant** and **Chill** — and the choice
-is saved per easel, from the canvas right-click menu. These are Arc's own palettes with
-Arc's own values, read out of the colour renditions in its asset catalog rather than
-matched by eye.
+The colour button opens a **wheel**, not a fixed grid: hue is the angle, saturation the
+distance from the centre, and **Brightness** is the third axis. Any colour is reachable. The
+hex field takes `#833BDD`, `833bdd` or `#83d` and commits on Enter or on leaving the field;
+the RGB channels beside it are a readout. **Opacity** sits under Brightness and replaced the
+standalone opacity row, behaving identically (see **Opacity**).
 
-Switching palette repaints the whole board at once and changes nothing about it: colour is
-stored as a name, so an object that is "red" is red in both, and simply resolves to
-`#F53714` in Vibrant and `#D74807` in Chill. Black, grey and white are shared.
+Everything except the swatches lives in one column beside the wheel — hex, channels, and both
+sliders — so the panel is a wheel and a column rather than a wheel and a stack of full-width
+rows. The captions sit above their tracks for the same reason: the column is too narrow to
+give a label, a track and a readout a line each.
 
-**The palette sets the colour of what you draw next, and repaints whatever is
-selected.** Select something and click a swatch — or press its number key — and it
-changes colour; the stroke widths beside the swatches work the same way, on shapes and
-ink. With nothing selected you are only setting the default for the next mark.
+**The wheel opens on the colour in force**, reported as it is: select something and the panel
+starts on that object's colour and opacity, exactly as the opacity slider already did, and a
+mixed selection falls back to the toolbar's own. Black shows a brightness of `0`, because
+that is what black is — reaching for the wheel is what lifts it, so the drag paints a colour
+rather than more black.
+
+The pen starts **white under a dark Zen theme and black under a light one**. A fixed black
+default was invisible on the board a dark browser comes up on.
+
+**Recently used** shows the last four colours that actually landed on the board, most recent
+first, saved per easel. It is fed from objects being drawn or recoloured, and from the board's
+own colour when the background panel closes — not from the wheel being moved, so exploring the
+wheel does not fill it with near-misses. A paste or a `Ctrl+D` is left out for the same reason
+in reverse: four differently-coloured objects arriving at once would replace the whole row in
+one action, and none of those colours was chosen here.
+
+**Favourites** sits beside it, four slots wide. **Left-click** one to put back the whole look
+— the wheel, the brightness that follows from it, and the opacity it was saved at, as a
+single undo step. **Right-click** one to save what the panel is currently on into that slot,
+replacing whatever was there. Unlike the recents these are a personal palette rather than a
+property of one board: they live in `zen.easel.favorites` and follow you between easels and
+between the toolbar and the background panel.
+
+That pref is read through `prefStr` at the moment the panel is built, not out of
+`ZenEaselUtil.prefs`. The cache exists to keep pointer-move handlers off XPCOM and is
+refreshed by an observer; a store that is written and read back in the same gesture wants
+neither, and routing it through the cache is what made every favourite vanish the moment the
+panel closed.
+
+Both rows are always drawn at full width, with unfilled slots black. A row that grew as you
+used it would shift everything under it, and a favourite's slot is its identity — you replace
+the third one, not "the third one there happens to be".
+
+**Standard** is Arc's own eleven colours on the first row and the seven Chill variants that
+differ on the second — read out of the colour renditions in Arc's asset catalog rather than
+matched by eye. Arc kept these as two switchable palettes stored per easel; that is gone,
+and both sets are simply always on offer. Boards saved under the old scheme migrate on
+open: a Chill board keeps its Chill values, and the file is rewritten with hex colours the
+next time it saves.
+
+**The picker sets the colour of what you draw next, and repaints whatever is
+selected.** Select something and drag the wheel — or click a swatch, or press a number
+key — and it changes colour; the stroke widths below work the same way, on shapes and ink.
+With nothing selected you are only setting the default for the next mark. A whole wheel
+drag is **one** undo step, not one per pixel of the gesture.
 
 It used to be the other way round: the swatch never touched the selection, and
 recolouring lived in the right-click menu. That was working around a problem that no
 longer exists — objects used to stay selected after being drawn, so a swatch click
 would silently repaint the thing you had just finished. Nothing is selected after you
 draw it any more, so the swatch can mean the obvious thing, and the duplicate row of
-swatches in the context menu is gone. Board backgrounds are still there, on empty
-canvas, because the toolbar has no control for those.
+swatches in the context menu is gone.
 
 Pen strokes vary in width: the line thins as the pen speeds up, and follows real
 pressure if you draw with a stylus. Set `zen.easel.ink-style` to `uniform` for a
@@ -283,20 +325,45 @@ if you own a licence and want to add one.
 
 ### Board background
 
-Right-click empty canvas for the background swatches. The choice is saved per easel, so
-different boards can look different. **Follow theme** is the default: it has no colour of
-its own and tracks Zen between light and dark mode, so a new easel comes up already
-matching the browser and keeps matching if the scheme changes under it. The grid contrast
-is derived from whatever the board actually ends up painted, so dots stay visible on a
-light background and a dark one alike. **Arc** is one click away: a pale multi-colour
-wash rather than flat paper, which is most of why Arc's boards read as soft.
+Right-click empty canvas and pick **Background** for the same wheel the toolbar uses. The
+choice is saved per easel, so different boards can look different. **Follow theme** is the
+default, in the panel's Standard row: it has no colour of its own and tracks **Zen's**
+theme — not the OS scheme, which is a different question — so a new easel comes up pale
+under a light workspace and near-black under a dark one, and keeps matching if the theme
+changes under it. The grid contrast is derived from whatever the board actually ends up
+painted, so dots stay visible on a light background and a dark one alike. **Arc** is one
+click away: a pale multi-colour wash rather than flat paper, which is most of why Arc's
+boards read as soft.
 
-Every board is a **tint, not a fill**. All nine presets carry an alpha, and nothing
+**The wheel shows the board that is in force**, on opening and after every pick. Click Paper
+and the wheel, the brightness and the opacity all move to Paper; reopen the panel later and
+they are still on it. Presets carry an opaque `swatch` and an alpha for exactly this. The two
+boards with no colour of their own, Follow theme and Transparent, fall through to the same
+default the pen does — white under a dark Zen theme, black under a light one — which is also
+what a brand new easel is sitting on. An easel already set to a colour of its own opens on
+that colour and its own opacity.
+
+The panel **stays open** when you pick, rather than dismissing itself with the menu. A
+preset is a whole board — a colour and an alpha — and the point of clicking one is to watch
+both land and then keep adjusting from there.
+
+Every board is a **tint, not a fill**. Every preset carries an alpha, and nothing
 between the board and Zen's window paints: `.easel-root` and the page's own `<body>` are
 permanently transparent, and `.easel-viewport` is the single painter of the board's
 colour. What you get is the window wearing the board's colour rather than a sheet of
-paper covering it. **Transparent** is the end of that scale — the one board that
-declines to tint at all.
+paper covering it.
+
+The panel's lower slider is **Opacity**, and it is that scale made continuous: `100%` is
+the board fully solid, `0%` is it declining to tint at all — the same thing the
+**Transparent** preset means. It tracks the board like the colour does: every preset carries
+an alpha of its own — Arc `0.44`, Paper `0.50`, Black `0.54` — so picking one moves this
+slider to it, and Transparent takes it to `0`. Only the two boards with no colour of their
+own have no alpha either, and those open fully opaque. Below about 20% the board is treated
+as having no colour of its own, and an export comes out with a transparent ground instead of
+a solid one.
+
+The board's colour joins **Recently used** too — recorded when the panel closes rather than
+on every slider release, so one session of adjusting leaves one entry rather than a dozen.
 
 Whether that is literally see-through is up to Zen, not to this mod: it needs
 `browser.tabs.allow_transparent_browser` set to `true` in `about:config`, which Zen's
@@ -314,31 +381,54 @@ would otherwise be holes onto the board.
 Transparent replaces the old **Sage** swatch; boards saved on Sage move across to it
 automatically the next time they are opened.
 
-### Chrome that follows the board
+### Chrome that follows Zen, and a board that does not
 
-The topbar, the toolbar, the popups and the context menu are the **active board's colour
-at a heavier alpha**, not a fixed panel grey. Switching from Paper to Ink carries the bar
-with it instead of leaving a light strip parked on a dark board, and because the chrome
-keeps an alpha of its own, the wallpaper behind Zen reads through the whole window rather
-than stopping at the topbar.
+The topbar, the toolbar, the popups and the context menu are **Zen's workspace colour at a
+heavier alpha**, not a fixed panel grey and not the board's colour. Change workspace or
+theme and the easel's panels come with it; change the board and they stay put. Because the
+chrome keeps an alpha of its own, the wallpaper behind Zen reads through the whole window
+rather than stopping at the topbar.
 
-`_applyBackground` in `modules/canvas.uc.js` is the single place this is decided. It
-writes three things onto the `<zen-easel>` host: `--easel-tint` (the board's channels,
-which `--easel-panel` re-alphas), `--easel-solid` (the same colour opaque, which the
-renderer paints with), and `data-easel-ink`. That last one exists because the chrome's
-ink has to follow the *board*, not the OS — a Slate board under a light system theme
-still needs light text, and `light-dark()` cannot say so because it is answering a
-different question. It is named for the decision rather than toggled so that "no board
-applied yet" stays its own state, and the stylesheet falls back to the OS scheme for the
-frames before the first board lands.
+Set **`zen.easel.hide-topbar`** to remove that bar altogether and give the board the whole
+tab. Nothing on it is only there: the easel's name is the heading on the board and the tab's
+own label, `Ctrl+0` resets the zoom and the context menu has it too, `Ctrl+W` closes the tab,
+and the switcher — the board list, New, Rename, Delete — reappears as **Easels** in the
+right-click menu on empty canvas. The one thing that does go is the live-card count, which
+reports the whole window; with the bar off, a card is stopped from its own right-click menu
+or its floating bar, board by board.
 
-The **transform handles** flip on the same switch. They are the one piece of selection
-chrome that must *not* be the board's colour — a grip painted in the board's own tint is
-a grip you cannot see — so `--easel-handle` lands one step brighter than the board in
-both directions: white over a light board, a lifted neutral (`#40404a`) over a dark one,
-with the accent ring doing the delimiting. White grips on a dark board would be the only
-light-scheme thing left once the chrome has flipped, and read as glare against Ink or
-Black. Both values are set by media query rather than `light-dark()`, because the
+They used to be the *board's* colour. That stopped working once the background became a
+wheel and a slider rather than nine presets: dragging the board's opacity dragged every
+panel with it, and crossing the sheer threshold flipped them light-to-dark mid-gesture.
+
+`_syncZenColors` in `page/easel-page.uc.js` is where the chrome's colour is decided. Zen's
+theme lives in the browser window, not in this document, so it reaches across and writes
+`--easel-chrome-tint` (the surface's channels, which `--easel-panel` re-alphas),
+`--easel-chrome-solid` (the same colour opaque, for the two rings that cannot be
+see-through), `--easel-accent`, and `data-easel-chrome-ink`. That last one exists because
+the ink has to follow the *panel*, not the OS — Zen's workspace colour can be dark under a
+light system theme — and `light-dark()` cannot say so because it is answering a different
+question. It runs at startup and again whenever the tab comes back into view, which is what
+catches a workspace switch.
+
+Zen's colours are read through a **probe element** rather than off the root:
+`getPropertyValue` hands a custom property back as authored, so a value written as
+`light-dark()` or `color-mix()` would arrive as a token string nothing here can parse.
+Setting it as a real `background-color` on a throwaway `<div>` and reading the computed
+value back is what turns it into an `rgb()`.
+
+`_applyBackground` in `modules/canvas.uc.js` still writes `--easel-tint`, `--easel-solid`
+and `data-easel-ink`, but nothing in the stylesheet reads the first two any more. What is
+left of them is the canvas: the floating card bar borrows the channels, and the renderer
+paints card bodies with the opaque colour — both sit *on* the board and would be holes onto
+it in any other colour.
+
+The **transform handles** flip on `data-easel-ink`, the board's own switch. They are the one
+piece of selection chrome that must *not* be the board's colour — a grip painted in the
+board's own tint is a grip you cannot see — so `--easel-handle` lands one step brighter than
+the board in both directions: white over a light board, a lifted neutral (`#40404a`) over a
+dark one, with the accent ring doing the delimiting. White grips read as glare against Ink
+or Black. Both values are set by media query rather than `light-dark()`, because the
 renderer reads them through `getComputedStyle` to paint on a canvas and an unregistered
 custom property hands back the literal `light-dark(…)` token, which `fillStyle` cannot
 parse.
@@ -817,8 +907,7 @@ In Zen's mod preferences, or directly in `about:config`:
 
 | Pref | Default | |
 |---|---|---|
-| `zen.easel.shortcut.new` | `Ctrl+Shift+E` | open the easel (restart to apply) |
-| `zen.easel.shortcut.capture` | `Ctrl+Shift+2` | capture a region (restart to apply) |
+| `zen.easel.hide-topbar` | `false` | remove the top bar; the switcher moves to the canvas' right-click menu |
 | `zen.easel.wheel` | `zoom` | `zoom` or `pan`; `Ctrl`+wheel zooms either way |
 | `zen.easel.ink-style` | `variable` | `variable` thins with speed and follows stylus pressure; `uniform` is a constant width |
 | `zen.easel.grid` | `dots` | `none`, `dots` or `lines` |
@@ -837,8 +926,9 @@ In Zen's mod preferences, or directly in `about:config`:
 | `zen.easel.storage-dir` | *(empty)* | empty means `<profile>/zen-easels` |
 | `zen.easel.debug` | `false` | `[zen-easel]` logging in the Browser Console |
 
-`Ctrl+Shift+E` is also the DevTools Network Monitor while DevTools has focus. Rebind it
-if that gets in your way.
+Every one of these applies live. The mod binds no keys of its own: an easel is opened from
+the toolbar button or the library, and a capture starts in Zen's own screenshot overlay,
+under whatever keybinding Zen already has for it.
 
 ---
 
@@ -864,7 +954,7 @@ window still open.
 
 | | |
 |---|---|
-| `ZenEaselHost.uc.js` | toolbar button, shortcut, opening/focusing the easel tab, the bridge |
+| `ZenEaselHost.uc.js` | toolbar button, opening/focusing the easel tab, the bridge |
 | `modules-host/capture-host.uc.js` | turns a region Zen selected into pixels, via `drawSnapshot`, and measures the page for a live card |
 | `modules-host/screenshot-hook.uc.js` | the **Easel** button on Zen's region bar and preview dialog, and the send-to-easel menu behind both |
 | `modules-host/capture-backdrop.uc.js` | works out what colour was behind the page, for both capture paths |
@@ -879,7 +969,7 @@ process.
 | `page/easel.xhtml` | the document: CSP, title, favicon, stylesheet, boot script |
 | `page/easel-boot.js` | the loader of record, at parse time |
 | `page/easel-page.uc.js` | the `<zen-easel>` element and the page controller |
-| `modules/objects.uc.js` | object model, validation, hit-testing, palette |
+| `modules/objects.uc.js` | object model, validation, hit-testing, colour |
 | `modules/renderer.uc.js` | canvas painting, culling, stroke bitmap cache, text wrapping |
 | `modules/freehand.uc.js` | variable-width stroke geometry |
 | `modules/guides.uc.js` | Arc's six alignment guides |
@@ -887,7 +977,8 @@ process.
 | `modules/text-editor.uc.js` | the textarea shown while editing a text box |
 | `modules/store.uc.js` | the page's view of the store: open document, blob cache, debounce, thumbnails |
 | `modules/canvas.uc.js` | viewport transform, input, selection, undo, the title heading, export |
-| `modules/tools.uc.js` | toolbar, palette, context menu |
+| `modules/color-picker.uc.js` | the colour wheel panel, shared by the toolbar and the board menu |
+| `modules/tools.uc.js` | toolbar, colour and tool state, context menu |
 | `modules/capture-page.uc.js` | placing captures, drops, file import |
 | `modules/library.uc.js` | easel switcher |
 | `actors/` | the two JSActor pairs — see below |
@@ -978,7 +1069,12 @@ the types named in Arc's binary.
   reports; painting happens once per frame however many events arrived. A 1000Hz mouse
   used to run a full layout pass ~16 times per displayed frame.
 - **Preferences are cached** behind a `Services.prefs` branch observer. Snapping used to
-  do two XPCOM reads per object per pointer event.
+  do two XPCOM reads per object per pointer event. The observer is registered on
+  `Services.prefs`, which is the *root* branch, so the name it is handed is the full
+  `zen.easel.grid` rather than the `grid` that `PREF_SPEC` is keyed by — it strips the branch
+  before looking it up. Comparing the raw name meant the guard matched nothing, so the cache
+  sat at whatever it read at startup for the life of the window and editing any `zen.easel`
+  pref did nothing until the next restart.
 - **Offscreen objects are culled** against a padded viewport rectangle.
 - **Committed strokes are rasterised once** and blitted afterwards, keyed on geometry,
   colour and zoom — Excalidraw's `elementWithCanvasCache` idea. Deliberately not keyed

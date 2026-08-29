@@ -290,38 +290,59 @@
         }
 
         _renderList() {
-            this._list.replaceChildren();
+            this._list.replaceChildren(...this._rows(() => this.closeList()));
+            // Re-rendered a second time when the refreshed index arrives, which can change
+            // the panel's height under a live tile that is already showing through it.
+            this.host.chromeChanged();
+        }
+
+        // The switcher's contents, built fresh each time. `dismiss` closes whatever is
+        // hosting them, which is not always this bar — see buildPicker.
+        _rows(dismiss) {
             const current = this.host.store.current;
+            const rows = [];
 
             for (const entry of this.host.store.listEasels()) {
                 const isCurrent = current && entry.id === current.id;
-                this._list.appendChild(this.el("button", {
+                rows.push(this.el("button", {
                     className: `easel-list-item${isCurrent ? " is-current" : ""}`,
                     type: "button",
-                    onclick: () => this.switchTo(entry.id)
+                    onclick: () => { dismiss(); this.switchTo(entry.id); }
                 }, [
                     this.el("span", { className: "easel-list-name", textContent: entry.title || "Untitled Easel" }),
                     this.el("span", { className: "easel-list-when", textContent: formatWhen(entry.updatedAt) })
                 ]));
             }
 
-            this._list.append(
+            rows.push(
                 this.el("div", { className: "easel-list-separator" }),
-                this._action("New easel", () => this.createNew()),
-                this._action("Rename this easel", () => this.renameCurrent()),
-                this._action("Delete this easel", () => this.deleteCurrent(), true)
+                this._action(dismiss, "New easel", () => this.createNew()),
+                this._action(dismiss, "Rename this easel", () => this.renameCurrent()),
+                this._action(dismiss, "Delete this easel", () => this.deleteCurrent(), true)
             );
-            // Re-rendered a second time when the refreshed index arrives, which can change
-            // the panel's height under a live tile that is already showing through it.
-            this.host.chromeChanged();
+            return rows;
         }
 
-        _action(label, handler, danger = false) {
+        // The same list as a standalone panel, for the canvas' context menu to host once
+        // the topbar — and with it the switcher — has been turned off.
+        buildPicker(dismiss) {
+            const list = this.el("div", { className: "easel-list is-inline" });
+            list.replaceChildren(...this._rows(dismiss));
+            // Same two-pass render as openList: another window may have touched the index.
+            this.host.store.refreshList()
+                .then(() => {
+                    if (list.isConnected) list.replaceChildren(...this._rows(dismiss));
+                })
+                .catch(e => console.error("[zen-easel]", e));
+            return list;
+        }
+
+        _action(dismiss, label, handler, danger = false) {
             return this.el("button", {
                 className: `easel-list-action${danger ? " is-danger" : ""}`,
                 type: "button",
                 textContent: label,
-                onclick: () => { this.closeList(); handler(); }
+                onclick: () => { dismiss(); handler(); }
             });
         }
 

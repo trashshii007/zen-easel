@@ -155,10 +155,9 @@
                 ), 0);
             }
 
-            // The palette resolves colour keys for the whole module, so it has to be in
-            // force before anything paints — hydrate is the one place that runs for every
-            // way a document can be opened.
-            const palette = Objects.setPalette(raw.palette);
+            // Colours are hex now. A board written before that stores keys, and this is which of Arc's two palettes they meant —
+            // defaulted rather than passed raw, or a file with no palette field at all would resolve every key to black.
+            const legacyPalette = raw.palette === "chill" ? "chill" : "vibrant";
             return {
                 id,
                 // Read by markDirty() and _handOff(). Absent on every normal document.
@@ -166,7 +165,12 @@
                 title: typeof raw.title === "string" ? raw.title : "Untitled Easel",
                 createdAt: raw.createdAt || Date.now(),
                 updatedAt: raw.updatedAt || Date.now(),
-                palette,
+                // Capped on the way in as well as on the way out: a hand-edited file could otherwise put thousands of swatches
+                // into the picker, the same reason MAX_OBJECTS and MAX_TEXT_LENGTH exist.
+                recentColors: Array.isArray(raw.recentColors)
+                    ? raw.recentColors.map(c => Objects.normalizeColor(c))
+                        .filter(Boolean).slice(0, Objects.RECENT_LIMIT)
+                    : [],
                 // undefined means "this board has never had a heading, give it one".
                 // Any string — including one pointing at an object that has since been
                 // deleted — means the question has already been settled for this easel.
@@ -194,7 +198,8 @@
                 // list used to make the page unresponsive on open with no way back to it;
                 // now the board opens with the first MAX_OBJECTS and says so.
                 objects: Array.isArray(raw.objects)
-                    ? raw.objects.slice(0, MAX_OBJECTS).map(o => Objects.sanitize(o)).filter(Boolean)
+                    ? raw.objects.slice(0, MAX_OBJECTS)
+                        .map(o => Objects.sanitize(o, legacyPalette)).filter(Boolean)
                     : []
             };
         }
@@ -275,7 +280,7 @@
                 title: doc.title,
                 createdAt: doc.createdAt,
                 updatedAt: doc.updatedAt,
-                palette: doc.palette || window.ZenEaselObjects.DEFAULT_PALETTE,
+                recentColors: doc.recentColors || [],
                 // JSON.stringify drops undefined, so a board that has never had a heading
                 // has no key at all on disk — which is exactly the state _hydrate reads
                 // back as "give this one a heading".

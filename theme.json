@@ -33,7 +33,7 @@
     },
     "ZenEaselHost.uc.js": {
       "name": "Zen Easel host",
-      "description": "Toolbar button, shortcuts, region capture and the bridge to the page",
+      "description": "Toolbar button, region capture and the bridge to the page",
       "include": [
         "chrome://browser/content/browser.xhtml"
       ]

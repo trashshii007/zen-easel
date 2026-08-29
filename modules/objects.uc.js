@@ -15,21 +15,10 @@
 (function () {
     if (window.ZenEaselObjects) return;
 
-    /* ---------------------------------------------------------------- palette */
+    /* ----------------------------------------------------------------- colour */
 
-    // Arc's eleven easel colours, in Arc's own palette order, and in both of the palettes
-    // its EaselPalette enum names. These are not approximations: the values were read out
-    // of the colour renditions in Arc's ARCClients_BaseAssets.bundle/Assets.car, where they
-    // are stored as Vibrant.EaselRed, Chill.EaselRed and so on. Keys match the enum cases
-    // (EaselBlack, EaselGrey, ...) so the mapping stays legible against the original.
-    //
-    // Arc's third provider, ThemePalette, ships no assets — it derives its colours from the
-    // window theme at runtime, and the palette actually *stored* on a document is only ever
-    // vibrant or chill. So there are two here, and the board background is what follows the
-    // Zen theme instead.
-    //
-    // Arc's "pink" is a coral, and its "purple" is a magenta. That is what is in the
-    // catalog; the names are Arc's, not a mislabelling here.
+    // Arc's eleven easel colour names, in Arc's own order, read out of the colour renditions in ARCClients_BaseAssets.bundle/Assets.car.
+    // Arc's "pink" is a coral and its "purple" is a magenta — the names are Arc's, not a mislabelling here.
     const COLOR_ORDER = [
         ["black", "Black"],
         ["gray", "Grey"],
@@ -44,43 +33,55 @@
         ["purple", "Purple"]
     ];
 
-    const PALETTE_VALUES = {
-        vibrant: ["#000000", "#BBBBBB", "#FFFFFF", "#FF994E", "#F53714", "#FFD335",
-            "#34E895", "#107A00", "#00C7F3", "#3139FB", "#C0009F"],
-        chill: ["#000000", "#BBBBBB", "#FFFFFF", "#F2C2AC", "#D74807", "#C2A12A",
-            "#D0D87F", "#1D5914", "#55A2BD", "#3139FB", "#A6729D"]
+    // Arc shipped these as two switchable palettes; they are now simply the picker's two standard rows.
+    const VIBRANT = ["#000000", "#BBBBBB", "#FFFFFF", "#FF994E", "#F53714", "#FFD335",
+        "#34E895", "#107A00", "#00C7F3", "#3139FB", "#C0009F"];
+    const CHILL = ["#000000", "#BBBBBB", "#FFFFFF", "#F2C2AC", "#D74807", "#C2A12A",
+        "#D0D87F", "#1D5914", "#55A2BD", "#3139FB", "#A6729D"];
+
+    const HEX_RE = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i;
+
+    // Any accepted spelling of a hex colour, reduced to the one form this mod stores — or null.
+    function normalizeColor(value) {
+        const match = HEX_RE.exec(String(value || "").trim());
+        if (!match) return null;
+        const hex = match[1].length === 3 ? match[1].split("").map(c => c + c).join("") : match[1];
+        return "#" + hex.toLowerCase();
+    }
+
+    const DEFAULT_COLOR = "#000000";
+
+    // What reads as "no colour chosen yet" against Zen's own chrome: white on a dark theme, black
+    // on a light one. Both the pen's starting colour and the board's fall through this, so a fresh
+    // easel is legible without anyone having picked anything.
+    const themeColor = dark => (dark ? "#ffffff" : DEFAULT_COLOR);
+
+    // Chill's other four entries are byte-identical to vibrant's, so row two would otherwise show four redundant pairs.
+    const CHILL_ONLY = [3, 4, 5, 6, 7, 8, 10];
+
+    // `key` is the hex itself, so the swatch row's active test and its onPick both work without a lookup table.
+    const swatchOf = (hex, label) => ({ key: normalizeColor(hex), label, css: normalizeColor(hex) });
+    const STANDARD_ROWS = [
+        COLOR_ORDER.map(([, label], i) => swatchOf(VIBRANT[i], label)),
+        CHILL_ONLY.map(i => swatchOf(CHILL[i], `${COLOR_ORDER[i][1]} (chill)`))
+    ];
+
+    // Documents written before colours became hex store a palette name and a colour key; this is the only thing that still reads them.
+    // Null-prototype: the key being looked up comes off disk, and a plain object answers "constructor" or "toString" from Object.prototype.
+    const legacyMap = values => {
+        const map = Object.create(null);
+        COLOR_ORDER.forEach(([key], i) => { map[key] = normalizeColor(values[i]); });
+        return map;
     };
+    const LEGACY_PALETTES = { vibrant: legacyMap(VIBRANT), chill: legacyMap(CHILL) };
 
-    const PALETTES = {};
-    for (const [name, values] of Object.entries(PALETTE_VALUES)) {
-        PALETTES[name] = COLOR_ORDER.map(([key, label], i) => ({ key, label, css: values[i] }));
-    }
+    // The single point a stored colour becomes something a canvas or a stylesheet can use.
+    const colorCss = value =>
+        normalizeColor(value) || LEGACY_PALETTES.vibrant[value] || DEFAULT_COLOR;
 
-    const PALETTE_NAMES = Object.keys(PALETTES);
-    const DEFAULT_PALETTE = "vibrant";
-
-    // Which palette the colour keys currently resolve through. Module state rather than a
-    // parameter threaded through every caller, because exactly one easel document is open
-    // per page — the same rule that lets the store keep a single current document.
-    let activePaletteName = DEFAULT_PALETTE;
-
-    function setPalette(name) {
-        activePaletteName = PALETTES[name] ? name : DEFAULT_PALETTE;
-        return activePaletteName;
-    }
-
-    function activePalette() {
-        return PALETTES[activePaletteName];
-    }
-
-    // Colour keys are shared across palettes, so a document keeps its meaning when the
-    // palette changes: the same object is "red" in both, painted differently.
-    const PALETTE_BY_KEY = new Map(COLOR_ORDER.map(([key], i) => [key, i]));
-    const colorCss = (key, paletteName) => {
-        const palette = PALETTES[paletteName] || activePalette();
-        const index = PALETTE_BY_KEY.get(key);
-        return palette[index === undefined ? 0 : index].css;
-    };
+    // How many colours the picker's "recently used" row remembers, capped on both read and write.
+    // The same count as the favourites beside it, so the two rows are the same width.
+    const RECENT_LIMIT = 4;
 
     // Board backgrounds, stored per easel. Every one of them is a *tint*, not a fill:
     // `css` carries an alpha, nothing between the board and Zen's window paints, and
@@ -148,10 +149,69 @@
     // board moves across instead of silently reverting to the default.
     const BACKGROUND_ALIASES = new Map([["sage", "transparent"]]);
 
+    // What a custom board is worth with no usable alpha of its own — opaque, the end of the scale the picker opens on.
+    const DEFAULT_BG_ALPHA = 1;
+
+    // Below this a custom board has effectively no colour of its own, and is treated the way "transparent" is.
+    const SHEER_BG_ALPHA = 0.2;
+
+    // A board painted in a colour no preset carries. One string, so nothing about the document schema changes.
+    const CUSTOM_BG_RE = /^custom:(#[0-9a-f]{6}):([01](?:\.\d{1,2})?)$/i;
+
+    function customBackground(hex, alpha) {
+        const value = Number(alpha);
+        const clamped = Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : DEFAULT_BG_ALPHA;
+        return `custom:${normalizeColor(hex) || DEFAULT_COLOR}:${clamped.toFixed(2)}`;
+    }
+
+    function parseCustomBackground(value) {
+        const match = CUSTOM_BG_RE.exec(String(value || "").trim());
+        if (!match) return null;
+        return { color: match[1].toLowerCase(), alpha: Math.min(1, Math.max(0, parseFloat(match[2]))) };
+    }
+
     // The one place a stored background key is turned into a live one.
     function resolveBackground(key) {
+        const custom = parseCustomBackground(key);
+        if (custom) return customBackground(custom.color, custom.alpha);
         const aliased = BACKGROUND_ALIASES.get(key) || key;
         return BACKGROUND_BY_KEY.has(aliased) ? aliased : DEFAULT_BACKGROUND;
+    }
+
+    // How much of itself a board paints, read back off a preset's own css. null means the board has no colour of its own.
+    function alphaOf(css) {
+        const value = String(css || "").trim();
+        if (!value) return null;
+        if (value === "transparent") return 0;
+        const match = /rgba\(\s*[\d.]+[\s,]+[\d.]+[\s,]+[\d.]+[\s,/]+([\d.]+)\s*\)/i.exec(value);
+        return match ? Number(match[1]) : 1;
+    }
+
+    // What a background value paints, for a preset key and a custom colour alike — the single seam every consumer reads through.
+    function backgroundPreset(value) {
+        const custom = parseCustomBackground(value);
+        if (!custom) {
+            const preset = BACKGROUND_BY_KEY.get(resolveBackground(value));
+            // Carries its own alpha out with it, so the picker can show what a preset actually
+            // is. `sheer` is stated rather than left off: both halves of this function return
+            // the same shape, so a caller testing it does not have to know which branch it got.
+            // A named board is never sheer — that is a thing only a dragged alpha can be.
+            return preset ? { ...preset, alpha: alphaOf(preset.css), sheer: false } : null;
+        }
+
+        const rgb = rgbOf(custom.color) || [0, 0, 0];
+        return {
+            // Rebuilt from the parsed parts rather than re-running resolveBackground over the
+            // string it was just handed: same canonical result, one regex instead of two.
+            key: customBackground(custom.color, custom.alpha),
+            label: "Custom",
+            // A zero-alpha board declines to tint at all, which is what the "transparent" preset means.
+            css: custom.alpha > 0 ? `rgba(${rgb.join(", ")}, ${custom.alpha})` : "transparent",
+            swatch: custom.color,
+            alpha: custom.alpha,
+            sheer: custom.alpha < SHEER_BG_ALPHA,
+            image: []
+        };
     }
 
     // The colour to paint under a rasterised board — an export or a library
@@ -164,8 +224,9 @@
     // The opaque `swatch`, not the tint: a PNG dropped into another app has no Zen
     // window behind it to tint, so the alpha would come out as a half-erased board.
     function backgroundFill(key) {
-        const preset = BACKGROUND_BY_KEY.get(resolveBackground(key));
-        if (!preset) return null;
+        const preset = backgroundPreset(key);
+        // A board dragged almost all the way to transparent has no colour to export, the same as the "transparent" preset.
+        if (!preset || preset.sheer) return null;
         if (preset.swatch) return preset.swatch;
         return preset.css && preset.css !== "transparent" ? preset.css : null;
     }
@@ -260,6 +321,31 @@
         return 0.2126 * channel(rgb[0]) + 0.7152 * channel(rgb[1]) + 0.0722 * channel(rgb[2]);
     }
 
+    // HSV rather than HSL, because that is what the wheel is: angle is hue, radius is saturation, and the slider is value.
+    function hexToHsv(value) {
+        const [r, g, b] = (rgbOf(colorCss(value)) || [0, 0, 0]).map(c => c / 255);
+        const max = Math.max(r, g, b);
+        const delta = max - Math.min(r, g, b);
+
+        let h = 0;
+        if (delta) {
+            if (max === r) h = (g - b) / delta + (g < b ? 6 : 0);
+            else if (max === g) h = (b - r) / delta + 2;
+            else h = (r - g) / delta + 4;
+            h *= 60;
+        }
+        return { h, s: max ? delta / max : 0, v: max };
+    }
+
+    function hsvToHex(h, s, v) {
+        const channel = n => {
+            const k = (n + h / 60) % 6;
+            return Math.round((v - v * s * Math.max(0, Math.min(k, 4 - k, 1))) * 255);
+        };
+        return "#" + [channel(5), channel(3), channel(1)]
+            .map(c => c.toString(16).padStart(2, "0")).join("");
+    }
+
     /* ------------------------------------------------------------ construction */
 
     const uuid = () => {
@@ -307,7 +393,7 @@
             // hovered, selected, dragged, resized or edited. Right-click still finds it —
             // that is the only way back to one, and the only way to unlock it.
             locked: false,
-            color: "black",
+            color: DEFAULT_COLOR,
             createdAt: now,
             updatedAt: now,
             ...props
@@ -621,7 +707,8 @@
     // Documents are read back from disk that a future version may have written, or
     // that a crash may have truncated. Anything that survives JSON.parse is coerced
     // into a shape the renderers can handle rather than trusted outright.
-    function sanitize(obj) {
+    // `legacyPalette` names which of Arc's two palettes an unmigrated colour key should resolve through — see _hydrate.
+    function sanitize(obj, legacyPalette) {
         if (!obj || typeof obj !== "object") return null;
         if (!obj.id || typeof obj.id !== "string") return null;
         if (!["text", "shape", "ink", "image", "webcard", "webBrowser"].includes(obj.type)) return null;
@@ -641,7 +728,10 @@
         // make an object unclickable for a reason nothing in the UI could then explain.
         // A document written before locking existed has no field, which reads as unlocked.
         obj.locked = obj.locked === true;
-        if (!PALETTE_BY_KEY.has(obj.color)) obj.color = "black";
+        // Hex on every board written since colours stopped being palette keys; the legacy lookup is what carries an older one across.
+        obj.color = normalizeColor(obj.color) ||
+            (LEGACY_PALETTES[legacyPalette] || LEGACY_PALETTES.vibrant)[obj.color] ||
+            DEFAULT_COLOR;
 
         if (obj.type === "text") {
             if (!obj.text || typeof obj.text !== "object") obj.text = {};
@@ -736,20 +826,20 @@
     }
 
     window.ZenEaselObjects = {
-        // A getter, not a snapshot: callers that build swatch rows read this every time
-        // they render, so switching palette repaints them without any of them knowing
-        // that palettes exist.
-        get PALETTE() { return activePalette(); },
-        PALETTES,
-        PALETTE_NAMES,
-        DEFAULT_PALETTE,
-        setPalette,
-        get palette() { return activePaletteName; },
-        PALETTE_BY_KEY,
+        STANDARD_ROWS,
+        DEFAULT_COLOR,
+        RECENT_LIMIT,
+        normalizeColor,
+        hexToHsv,
+        hsvToHex,
         TITLE_STYLE,
         BACKGROUNDS,
-        BACKGROUND_BY_KEY,
         DEFAULT_BACKGROUND,
+        DEFAULT_BG_ALPHA,
+        themeColor,
+        customBackground,
+        parseCustomBackground,
+        backgroundPreset,
         resolveBackground,
         backgroundFill,
         FONTS,

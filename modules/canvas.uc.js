@@ -55,6 +55,9 @@
     // present but dead.
     const FLOATING_UI = [
         ".easel-menu",
+        // The colour panel branching off the board menu. It is a drag target, so without this a
+        // pull across the wheel marquee-selects the board underneath it.
+        ".easel-popup",
         ".easel-text-editor",
         ".easel-text-controls",
         ".easel-shape-controls",
@@ -1107,7 +1110,7 @@
             const size = Math.max(4, prefs["grid-size"]) * zoom;
             const s = this.root.style;
 
-            const preset = this.Objects.BACKGROUND_BY_KEY.get(this.background);
+            const preset = this.Objects.backgroundPreset(this.background);
             // Already a list. It was a comma-joined string that had to be split back
             // apart here, and the splitter could not distinguish a separator from the
             // commas inside rgba() — every gradient came apart, the joined value was
@@ -1155,21 +1158,46 @@
             return (this.doc && this.doc.background) || this.Objects.DEFAULT_BACKGROUND;
         }
 
-        setBackground(key) {
+        // `live` is a drag in flight — the wheel or the transparency slider. Unlike setSelectionOpacity this cannot lean on
+        // beginMutation, which snapshots objects by id: the background is a document field and has no id. So the origin is
+        // captured once at the top of the gesture and one undo pair is pushed when it ends.
+        setBackground(key, live = false) {
             if (!this.doc) return;
-            const previous = this.background;
-            if (previous === key) return;
+            if (live && this._bgDragFrom === undefined) this._bgDragFrom = this.background;
+            const previous = this._bgDragFrom === undefined ? this.background : this._bgDragFrom;
 
             const apply = value => () => {
                 this.doc.background = value;
-                this._applyBackground();
-                // The wash is a grid layer, so the next paint picks it up: background
-                // is part of the signature _applyGrid compares against.
-                this._paintViewport();
+                // A frame either way — the wash is a grid layer, and background is part of
+                // the signature _applyGrid compares against, which _paintNow runs first.
+                // But only a board whose opaque colour moved changes what the *objects* look
+                // like, so only that marks the static layer dirty. A wheel drag through one
+                // ink therefore schedules a cheap frame per move rather than re-rasterising
+                // every object into each of them.
+                if (this._applyBackground()) this._paintViewport();
+                else this._paint();
             };
-            apply(key)();
+
+            // The viewport transitions background-color over 260ms; a value per pointermove into that smears behind the thumb.
+            this.root.toggleAttribute("data-easel-live-bg", live);
+
+            if (this.background !== key) apply(key)();
+            if (live) {
+                this._touch();
+                return;
+            }
+
+            this._bgDragFrom = undefined;
+            // Compared against the origin, not against the last live value the drag just painted.
+            if (previous === key) return;
             this._push({ undo: apply(previous), redo: apply(key) });
             this._touch();
+        }
+
+        // Ends a background drag that was interrupted rather than released — the menu closing under it, the board being switched.
+        endBackgroundDrag() {
+            if (this._bgDragFrom === undefined) return;
+            this.setBackground(this.background, false);
         }
 
         /* ---------------------------------------------------------- canvas mode */
@@ -1270,29 +1298,24 @@
             return true;
         }
 
-        /* ------------------------------------------------------------- palette */
+        /* --------------------------------------------------------- recent colours */
 
-        get palette() {
-            return (this.doc && this.doc.palette) || this.Objects.DEFAULT_PALETTE;
+        get recentColors() {
+            return (this.doc && this.doc.recentColors) || [];
         }
 
-        // Switching palette repaints every object at once: colour keys are shared between
-        // the palettes, so nothing on the board is rewritten — the same object is "red" in
-        // both and simply resolves to a different value.
-        setPalette(name) {
+        // The picker's "recently used" row. Fed from where a colour actually lands on the board, not from where one is picked.
+        _noteRecentColor(colors) {
             if (!this.doc) return;
-            const previous = this.palette;
-            if (previous === name || !this.Objects.PALETTES[name]) return;
+            const list = (Array.isArray(colors) ? colors : [colors])
+                .map(c => this.Objects.normalizeColor(c))
+                .filter(Boolean);
+            if (!list.length) return;
 
-            const apply = value => () => {
-                this.doc.palette = value;
-                this.Objects.setPalette(value);
-                this.renderer.invalidateInkCache();
-                this.invalidate();
-                if (this.host.tools) this.host.tools.syncPalette();
-            };
-            apply(name)();
-            this._push({ undo: apply(previous), redo: apply(name) });
+            const next = [...new Set([...list.reverse(), ...this.recentColors])]
+                .slice(0, this.Objects.RECENT_LIMIT);
+            if (next.join() === this.recentColors.join()) return;
+            this.doc.recentColors = next;
             this._touch();
         }
 
@@ -1302,7 +1325,7 @@
         // which is what makes them look like part of the board rather than a grey strip
         // parked on top of it.
         _applyBackground() {
-            const preset = this.Objects.BACKGROUND_BY_KEY.get(this.background);
+            const preset = this.Objects.backgroundPreset(this.background);
             this.root.style.backgroundColor = preset && preset.css ? preset.css : "";
             // This method and the tail of it are where every value the floating card bar
             // borrows is written, so this is the one place that has to drop the cache.
@@ -1325,9 +1348,31 @@
             // Read from the preset rather than from the painted result: a computed
             // rgba(…, 0.5) says nothing about what is behind it, and judging a tint by
             // its own colour is both cheaper and the answer we actually want.
-            const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-            const solid = (preset && preset.swatch) || (prefersDark ? "#1B1B1D" : "#FBFBFA");
+            // A custom board dragged almost all the way to transparent is barely painting, so it borrows the theme's colour too.
+            //
+            // "Follow theme" means Zen's theme, not the OS scheme — a dark workspace under a light
+            // system theme should still come up on a dark board. _syncZenColors has already
+            // resolved which that is; the media query is the fallback for a page that could not
+            // reach the browser window.
+            const chromeInk = this.host.getAttribute("data-easel-chrome-ink");
+            const prefersDark = chromeInk
+                ? chromeInk === "dark"
+                : window.matchMedia("(prefers-color-scheme: dark)").matches;
+            const solid = (preset && !preset.sheer && preset.swatch) ||
+                (prefersDark ? "#1B1B1D" : "#FBFBFA");
             const isLight = this.Objects.luminanceOf(solid) > 0.45;
+            const ink = isLight ? "light" : "dark";
+
+            // Returns whether the board's *opaque* colour moved, which is a narrower question
+            // than whether the board changed. The tint above is CSS and repaints itself; these
+            // three are what the renderer paints card bodies and grips from, so they are the
+            // only part of a background change that can alter a pixel on the canvas. The
+            // background is a wheel now — every pointermove lands here — and answering this
+            // honestly is what keeps a drag from re-rasterising every object sixty times a
+            // second. See the call in setBackground.
+            if (this._boardInk === ink && this._boardSolid === solid) return false;
+            this._boardInk = ink;
+            this._boardSolid = solid;
 
             const rgb = this.Objects.rgbOf(solid) || [251, 251, 250];
             // Set on the host, not on the viewport: :host rules and the whole shadow
@@ -1345,9 +1390,10 @@
             // decision instead of toggled, so that "no board has been applied yet" is
             // its own state and the stylesheet can fall back to the OS scheme for the
             // frames before this first runs.
-            this.host.setAttribute("data-easel-ink", isLight ? "light" : "dark");
+            this.host.setAttribute("data-easel-ink", ink);
 
             this.root.style.setProperty("--easel-grid", isLight ? "rgba(0,0,0,0.14)" : "rgba(255,255,255,0.12)");
+            return true;
         }
 
         /* ---------------------------------------------------------- zoom & pan */
@@ -1625,7 +1671,13 @@
             return true;
         }
 
-        addObjects(objs, { select = true } = {}) {
+        // `note` feeds the picker's recently-used row. Off by default, because this is the
+        // single add path and most of what comes through it is not a colour anyone chose:
+        // a paste or a Ctrl+D of four differently-coloured objects would replace the whole
+        // four-slot row in one action, and a dropped image or web tile carries a colour
+        // field it never paints with. Only _finishCreated — an object you just drew, in the
+        // colour the toolbar was holding — asks for it.
+        addObjects(objs, { select = true, note = false } = {}) {
             const copies = objs.map(deepCopy);
             // select:false means "not selected", not "leave the selection alone" — an
             // id can already be in the set from before the object was rebuilt.
@@ -1642,6 +1694,12 @@
             apply();
             if (select) this.select(copies.map(o => o.id));
             this._push({ undo: revert, redo: () => { apply(); this.select(copies.map(o => o.id)); } });
+            // Only the types that actually paint with their colour — an image or a web tile carries the field without using it.
+            if (note) {
+                this._noteRecentColor(copies
+                    .filter(o => o.type === "text" || o.type === "shape" || o.type === "ink")
+                    .map(o => o.color));
+            }
             this._touch();
             this.invalidate();
             return copies.map(o => o.id);
@@ -2413,7 +2471,7 @@
             // Nothing is selected after being drawn. A transform box thrown around
             // every finished shape is in the way of the next one, and you have just
             // said where you wanted it — selection is for when you come back to it.
-            this.addObjects([snapshot], { select: false });
+            this.addObjects([snapshot], { select: false, note: true });
             this._endActive();
             if (this.host.tools) this.host.tools.afterCreate();
         }
@@ -2714,8 +2772,8 @@
                 this.host.tools._export("png");
                 return true;
             }
-            // Everything below is Ctrl-only. Declining Ctrl+Shift+<key> here is what
-            // leaves Ctrl+Shift+2 free for the global capture shortcut.
+            // Everything below is Ctrl-only. Declining Ctrl+Shift+<key> here is what leaves
+            // that whole range to Zen and to Firefox rather than swallowing it on a board.
             if (e.shiftKey) return false;
 
             switch (e.code) {
@@ -3049,17 +3107,74 @@
             this.invalidate();
         }
 
-        setSelectionColor(color) {
-            if (!this.selection.size) return;
+        // `live` is the wheel being dragged, and works exactly as it does for opacity below: one mutation is held open across the
+        // gesture so the whole drag lands on the undo stack as a single step.
+        setSelectionColor(color, live = false) {
+            if (!this.selection.size) {
+                this.endColorDrag();
+                return;
+            }
+
             const ids = [...this.selection];
-            this.beginMutation(ids);
+            if (!this._colorLive) this.beginMutation(ids);
+            this._colorLive = live;
+
+            // Normalised here rather than trusted from the caller, for the same reason
+            // setSelectionOpacity clamps: this is the public entry point, and sanitize()
+            // applies the identical rule on load. One definition, so a colour that reaches an
+            // object can never be one the validator would refuse to read back.
+            const value = this.Objects.normalizeColor(color) || this.Objects.DEFAULT_COLOR;
             for (const id of ids) {
                 const obj = this._byId(id);
-                if (obj) obj.color = color;
+                if (obj) obj.color = value;
             }
+
+            if (live) {
+                this._touch();
+            } else {
+                this.commitMutation();
+                // Recorded here rather than on every frame of the drag, or one gesture would fill the whole row with near-misses.
+                this._noteRecentColor(value);
+            }
+            // Cached ink bitmaps are keyed on the colour, so a recolour has to say so
+            // explicitly — nothing about the geometry changed.
+            this.renderer.invalidateInkCache();
+            this.invalidate();
+        }
+
+        // The colour counterpart to endOpacityDrag, for a wheel drag the popup closed under.
+        endColorDrag() {
+            if (!this._colorLive) return;
+            this._colorLive = false;
             this.commitMutation();
-            // Cached ink bitmaps are keyed on the colour *key*, so a recolour has to
-            // say so explicitly — nothing about the geometry changed.
+        }
+
+        // Colour and opacity together, in one mutation. Restoring a saved favourite is a
+        // single action, and putting it through the two setters left two entries on the undo
+        // stack — the first of them a half-applied look nobody asked for. The board's own
+        // panel already got this right by folding both into one setBackground; this is the
+        // same guarantee for objects.
+        setSelectionStyle(color, opacity) {
+            if (!this.selection.size) return;
+            // Either drag could still be open if a favourite is clicked mid-gesture, and both
+            // hold the same _pending slot this is about to take.
+            this.endColorDrag();
+            this.endOpacityDrag();
+
+            const ids = [...this.selection];
+            this.beginMutation(ids);
+
+            const value = this.Objects.normalizeColor(color) || this.Objects.DEFAULT_COLOR;
+            const alpha = this.Objects.clampOpacity(opacity);
+            for (const id of ids) {
+                const obj = this._byId(id);
+                if (!obj) continue;
+                obj.color = value;
+                obj.opacity = alpha;
+            }
+
+            this.commitMutation();
+            this._noteRecentColor(value);
             this.renderer.invalidateInkCache();
             this.invalidate();
         }

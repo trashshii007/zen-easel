@@ -267,8 +267,6 @@ class EaselStoreImpl {
         const body = {
             version: INDEX_VERSION,
             id, title, createdAt: now, updatedAt: now,
-            // Arc's EaselPalette, stored on the document rather than as a preference.
-            palette: "vibrant",
             // These two are the page's DEFAULT_BACKGROUND and DEFAULT_CANVAS_MODE
             // (modules/objects.uc.js), repeated as literals because this is a
             // per-process background module and that one is per window. "theme" is the

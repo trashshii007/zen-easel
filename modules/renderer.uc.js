@@ -464,9 +464,9 @@
             return true;
         }
 
-        // The cache key holds the colour *key*, not the value it resolves to, so switching
-        // palette leaves every cached stroke painted in the old palette's colours. Nothing
-        // about the objects changed, which is exactly why this has to be explicit.
+        // Strokes are cached as bitmaps keyed on their colour, so a recolour leaves every one of
+        // them painted in the old value. Nothing about the geometry changed, which is exactly why
+        // this has to be said explicitly rather than falling out of an invalidation.
         invalidateInkCache() {
             this._inkCache.clear();
         }
@@ -1410,9 +1410,9 @@
 
         // The grip discs, which are not the board's colour: a handle painted in the
         // board's own tint is a handle you cannot see. --easel-handle flips on
-        // data-easel-ink exactly as the rest of the chrome does, so the board — not the
-        // OS scheme — decides, and it lands one step *brighter* than the board in both
-        // directions so the grip reads as raised off the surface either way.
+        // data-easel-ink, so the board — not the OS scheme, and not Zen's workspace colour,
+        // which is what the floating panels follow — decides. It lands one step *brighter*
+        // than the board in both directions so the grip reads as raised off it either way.
         _handleColor() { return this._cssVar("--easel-handle", "#ffffff"); }
 
         _withAlpha(color, alpha) {

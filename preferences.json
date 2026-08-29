@@ -7,40 +7,26 @@
   },
   {
     "type": "text",
-    "label": "An infinite canvas for web captures, text, shapes and ink. Everything is stored locally as JSON and PNG inside your Zen profile — nothing is uploaded anywhere.",
+    "label": "An infinite canvas for web captures, text, shapes and ink — stored locally in your profile, never uploaded.",
     "size": "12px",
     "margin": "0 0 6px 0"
   },
 
   {
     "type": "separator",
-    "label": "Shortcuts — restart to apply",
+    "label": "Canvas",
     "margin": "20px 0 10px 0"
   },
   {
-    "type": "string",
-    "property": "zen.easel.shortcut.new",
-    "label": "Open Easel. Accepts modifiers Ctrl, Alt, Shift and a single key, joined by +. Note that Ctrl+Shift+E is also the DevTools Network Monitor while DevTools has focus.",
-    "defaultValue": "Ctrl+Shift+E",
-    "placeholder": "Ctrl+Shift+E"
-  },
-  {
-    "type": "string",
-    "property": "zen.easel.shortcut.capture",
-    "label": "Capture a region of the current page onto the easel.",
-    "defaultValue": "Ctrl+Shift+2",
-    "placeholder": "Ctrl+Shift+2"
-  },
-
-  {
-    "type": "separator",
-    "label": "Canvas — applies live",
-    "margin": "20px 0 10px 0"
+    "type": "checkbox",
+    "property": "zen.easel.hide-topbar",
+    "label": "Hide the top bar — the easel switcher moves to the canvas right-click menu.",
+    "defaultValue": false
   },
   {
     "type": "dropdown",
     "property": "zen.easel.wheel",
-    "label": "What the scroll wheel does. Ctrl+wheel always zooms either way, and pinch on a precision touchpad arrives as Ctrl+wheel, so touchpad users may prefer Scroll.",
+    "label": "Scroll wheel. Ctrl+wheel always zooms.",
     "defaultValue": "zoom",
     "options": [
       { "value": "zoom", "label": "Zoom (centred on the pointer)" },
@@ -50,17 +36,17 @@
   {
     "type": "dropdown",
     "property": "zen.easel.ink-style",
-    "label": "Pen stroke style. Variable width thins the line as the pen speeds up, and follows real pressure on a stylus.",
+    "label": "Pen stroke style.",
     "defaultValue": "variable",
     "options": [
-      { "value": "variable", "label": "Variable width" },
+      { "value": "variable", "label": "Variable width (speed and stylus pressure)" },
       { "value": "uniform", "label": "Uniform width" }
     ]
   },
   {
     "type": "dropdown",
     "property": "zen.easel.grid",
-    "label": "Canvas grid. The board's own colour is set per easel — right-click empty canvas.",
+    "label": "Canvas grid. Board colour is per easel — right-click empty canvas.",
     "defaultValue": "dots",
     "placeholder": "dots",
     "options": [
@@ -72,7 +58,7 @@
   {
     "type": "dropdown",
     "property": "zen.easel.snap",
-    "label": "How objects snap while you move them. Alignment guides line an object up with its neighbours' edges and centres and draw a line showing what it matched — this is what Arc does, and it is what makes a board look tidy without a grid. A fast drag never snaps. Hold Alt to suppress it.",
+    "label": "How objects snap while you move them. Hold Alt to suppress.",
     "defaultValue": "guides",
     "options": [
       { "value": "guides", "label": "Alignment guides (to other objects)" },
@@ -91,19 +77,13 @@
 
   {
     "type": "separator",
-    "label": "Capture backdrop — applies live",
+    "label": "Capture backdrop",
     "margin": "20px 0 10px 0"
-  },
-  {
-    "type": "text",
-    "label": "Zen makes the content view transparent, so a page whose own background has been made transparent — which is what the Zen Internet extension does per site — is really being read against your Zen window. A screenshot has no window behind it, and every screenshot path in Firefox composites onto white, so light text on a dark window comes out blown out and half-erased. This puts the colour that was behind the page into the picture instead. It applies to Zen's own screenshots as well as to Zen Easel's, and it never touches the page or the extension.",
-    "size": "12px",
-    "margin": "0 0 8px 0"
   },
   {
     "type": "dropdown",
     "property": "zen.easel.capture-backdrop",
-    "label": "What goes behind a captured page. Off is Firefox's white, exactly as before.",
+    "label": "What goes behind a captured page, so a transparent tab is not flattened onto white.",
     "defaultValue": "auto",
     "options": [
       { "value": "auto", "label": "Your window's colour, on transparent tabs" },
@@ -116,7 +96,7 @@
   {
     "type": "string",
     "property": "zen.easel.capture-backdrop-color",
-    "label": "The colour used by Custom above. Any CSS colour — #1b1b1b, rgb(27 27 27), or rgba(0,0,0,0.5) if you actually want a see-through screenshot. Ignored in every other mode.",
+    "label": "The colour used by Custom above. Any CSS colour.",
     "defaultValue": "",
     "placeholder": "#1b1b1b"
   },
@@ -127,22 +107,16 @@
     "margin": "20px 0 10px 0"
   },
   {
-    "type": "text",
-    "label": "A capture can be flipped from a screenshot to the real, live website, cropped to the same region. This is the one part of Zen Easel that touches the network: a live card loads the site with your normal cookies and session, exactly as an ordinary tab would. Cards always open as screenshots and only go live when you ask.",
-    "size": "12px",
-    "margin": "0 0 8px 0"
-  },
-  {
     "type": "checkbox",
     "property": "zen.easel.live.enabled",
-    "label": "Allow cards to be made live. Off means no easel ever loads a website, whatever is saved in a document.",
+    "label": "Allow a captured card to be flipped to the real, live website.",
     "defaultValue": true
   },
   {
     "type": "string",
     "value": "number",
     "property": "zen.easel.live.max-tiles",
-    "label": "How many cards may be live at once, across every board in a window. 0 means no limit. A live card keeps running — scrolling away, switching easel and backgrounding the tab all stop it painting, not running — so this is the ceiling on how many websites an easel can be keeping alive. Each one is a separate content process. Over the limit, the least recently used card you cannot currently see is stopped first.",
+    "label": "How many cards may be live at once, per window. 0 means no limit.",
     "defaultValue": 12,
     "placeholder": "12"
   },
@@ -150,7 +124,7 @@
     "type": "string",
     "value": "number",
     "property": "zen.easel.live.idle-timeout-min",
-    "label": "Stop a live card after this many minutes out of sight. 0 means never. Only cards you cannot see are counted — one on screen, or one playing audio, never times out however long it has been there. A card that does revert to its screenshot, and one click starts it again.",
+    "label": "Stop a live card after this many minutes out of sight. 0 means never.",
     "defaultValue": 30,
     "placeholder": "30"
   },
@@ -158,28 +132,28 @@
     "type": "string",
     "value": "number",
     "property": "zen.easel.live.reveal-delay-ms",
-    "label": "How long to wait before showing live cards again after switching back to an easel. A live card is not part of the tab-switch animation, so revealing it while that is still playing makes it appear to fly in separately. The card's screenshot is shown throughout the wait. Raise it if your tab animations are slower; 0 shows them immediately.",
+    "label": "Delay before revealing live cards after switching back to an easel.",
     "defaultValue": 140,
     "placeholder": "140"
   },
   {
     "type": "checkbox",
     "property": "zen.easel.live.private",
-    "label": "Load live cards in a private session. Sites will render logged out, which is the point — use it when you would rather a board not carry your session around.",
+    "label": "Load live cards in a private session — sites render logged out.",
     "defaultValue": false
   },
   {
     "type": "string",
     "value": "number",
     "property": "zen.easel.live.container",
-    "label": "Container ID to load live cards in, or 0 for your normal session. Isolates their cookies from ordinary browsing.",
+    "label": "Container ID for live cards, or 0 for your normal session.",
     "defaultValue": 0,
     "placeholder": "0"
   },
   {
     "type": "checkbox",
     "property": "zen.easel.live.allow-http",
-    "label": "Allow live cards over plain http. Off by default: a stored http link is fine to keep and to open in a tab, but loading it silently inside an easel is a downgrade you did not ask for.",
+    "label": "Allow live cards over plain http.",
     "defaultValue": false
   },
 
@@ -192,37 +166,31 @@
     "type": "string",
     "value": "number",
     "property": "zen.easel.autosave-ms",
-    "label": "Autosave delay in milliseconds after the last change. Lower means less can be lost in a crash; higher means fewer disk writes.",
+    "label": "Autosave delay in milliseconds after the last change.",
     "defaultValue": 500,
     "placeholder": "500"
   },
   {
     "type": "string",
     "property": "zen.easel.storage-dir",
-    "label": "Where easels are stored. Leave empty to use zen-easels inside your profile folder.",
+    "label": "Where easels are stored. Empty uses zen-easels in your profile folder.",
     "defaultValue": "",
     "placeholder": "(profile)/zen-easels"
   },
 
   {
     "type": "separator",
-    "label": "Split view — a Zen workaround",
+    "label": "Split view",
     "margin": "20px 0 10px 0"
-  },
-  {
-    "type": "text",
-    "label": "Dragging a split divider misbehaves when an about: page is in the split — the divider snaps to one side and stops following the pointer, and at speed the panes strobe. about:preferences and about:config do it too, in a stock profile. Mouse events coming from those pages are measured from the page's own corner rather than the window's, so the divider is told the pointer is somewhere it is not.",
-    "size": "12px",
-    "margin": "0 0 8px 0"
   },
   {
     "type": "dropdown",
     "property": "zen.easel.split-resize",
-    "label": "How a split divider behaves while you drag it. Set this to Off when Zen fixes the flicker upstream.",
+    "label": "Works around a split divider snapping and strobing with an about: page in the split.",
     "defaultValue": "ghost",
     "options": [
       { "value": "ghost", "label": "Move a guide line, resize on release (fixes both)" },
-      { "value": "freeze", "label": "Resize live, hold the page still (no strobe, snapping remains)" },
+      { "value": "freeze", "label": "Resize live, hold the page still (no strobe)" },
       { "value": "off", "label": "Off — Zen's own behaviour" }
     ]
   },
