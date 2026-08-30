@@ -916,22 +916,41 @@
         // written it, and the page object covers the window between load and that write.
         // The URL prefix alone is not enough any more: it would match every easel tab, and
         // picking the first would put one board's websites over another board's tab.
+        _tabShowsEasel(tab, easelId) {
+            const browser = tab?.linkedBrowser;
+            if (!browser) return false;
+            let spec = "";
+            try { spec = browser.currentURI ? browser.currentURI.spec : ""; } catch (e) { return false; }
+            if (!isEaselSpec(spec)) return false;
+            try {
+                if (new URL(spec).searchParams.get("easel") === easelId) return true;
+            } catch (e) { }
+            try {
+                if (browser.contentWindow?.gZenEaselPage?.easelId === easelId) return true;
+            } catch (e) { }
+            return false;
+        }
+
+        // Prefer the tab that is actually on screen, then a glance satellite, then
+        // whatever is left. Two tabs can share an id while a pinned board has a
+        // glance overlay, and the first match in strip order is almost never the
+        // one whose content area the tiles should sit over.
         _easelBrowserFor(easelId) {
             if (!easelId) return null;
             try {
+                const matches = [];
                 for (const tab of gBrowser.tabs) {
-                    const browser = tab.linkedBrowser;
-                    const spec = browser && browser.currentURI ? browser.currentURI.spec : "";
-                    if (!isEaselSpec(spec)) continue;
-                    try {
-                        if (new URL(spec).searchParams.get("easel") === easelId) return browser;
-                    } catch (e) { }
-                    try {
-                        if (browser.contentWindow?.gZenEaselPage?.easelId === easelId) return browser;
-                    } catch (e) { }
+                    if (this._tabShowsEasel(tab, easelId)) matches.push(tab);
                 }
-            } catch (e) { }
-            return null;
+                if (!matches.length) return null;
+                const selected = matches.find(tab => tab.linkedBrowser === gBrowser.selectedBrowser);
+                if (selected) return selected.linkedBrowser;
+                const glance = matches.find(tab => tab.hasAttribute("zen-glance-tab"));
+                if (glance) return glance.linkedBrowser;
+                return matches[0].linkedBrowser;
+            } catch (e) {
+                return null;
+            }
         }
 
         // Whether this board's tab is the one on screen *right now*.
@@ -1755,6 +1774,26 @@
             if (!easelId) return;
             const board = this._boardFor(easelId);
             if (!board) return;
+
+            // A glance satellite unloading is not the board going away — the pinned
+            // original is still there. Retarget the layer and leave the tiles running.
+            try {
+                const remaining = [];
+                for (const tab of gBrowser.tabs) {
+                    if (tab.closing) continue;
+                    if (this._tabShowsEasel(tab, easelId)) remaining.push(tab);
+                }
+                if (remaining.length > 1) {
+                    const keep = remaining.find(tab => !tab.hasAttribute("zen-glance-tab"))
+                        || remaining[0];
+                    this._setOwner(board, keep.linkedBrowser);
+                    board.visible = false;
+                    board.tabShowing = this._isBoardTabShowing(easelId);
+                    this._applyLayerVisibility(board);
+                    return;
+                }
+            } catch (e) { }
+
             board.visible = false;
             // _activeId is one per window — only one tile can hold the pointer — so a tile
             // on the departing board would otherwise keep pointerEvents and its outline.

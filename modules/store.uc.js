@@ -69,6 +69,10 @@
 
             // Last time a thumbnail was rasterised, per easel id.
             this._thumbAt = new Map();
+
+            // A glance satellite is writing this board; this page's copy is stale and
+            // must not reach disk. See freezeWrites / reloadFromDisk.
+            this._frozen = false;
         }
 
         async init() {
@@ -243,13 +247,59 @@
 
         /* --------------------------------------------------------------- saving */
 
+        // Another view of this board — a glance satellite — has taken over as its writer.
+        // The page stays loaded, as a pinned tab usually does, but everything that reaches
+        // disk is gated on this until reloadFromDisk lifts it.
+        freezeWrites() {
+            this._frozen = true;
+            this._cancelPendingSave();
+        }
+
+        // After the satellite has flushed. The file is the truth and this in-memory copy is
+        // not, so there is deliberately no flush on the way in — that would write the stale
+        // board straight back over it.
+        //
+        // The thaw is the last step rather than the first. Unfreezing before the read means
+        // a mutation arriving during it schedules a save of the copy that is about to be
+        // discarded, and the 500ms debounce is long enough for that save to land after the
+        // new document is in place. A read that fails leaves the page frozen, which is the
+        // safe end of that trade: a board that will not save until its tab is reloaded,
+        // rather than one that overwrites the file with what it had before.
+        async reloadFromDisk() {
+            this._cancelPendingSave();
+            const id = this._doc?.id;
+            if (!id) return null;
+
+            const json = await EaselStore.readDocument(id);
+            if (!json) {
+                await this.refreshList();
+                return null;
+            }
+
+            let raw;
+            try {
+                raw = JSON.parse(json);
+            } catch (e) {
+                console.error(`[zen-easel] easel ${id} is not valid JSON:`, e);
+                return null;
+            }
+
+            // Released only now that there is a document to replace this one with: a
+            // failure above leaves the board painting from the blob URLs it already has.
+            this._releaseAssets();
+            this._doc = this._hydrate(id, raw);
+            this._frozen = false;
+            await this.refreshList();
+            return this._doc;
+        }
+
         // Runs on every mutation, which includes every frame of a pan or zoom. The
         // debounce is here rather than in the background module specifically so that
         // JSON.stringify happens once per settled gesture instead of once per frame.
         markDirty() {
             // A board that was truncated on load is showing less than the file holds, so
             // saving it would delete the difference. See _hydrate.
-            if (this._destroyed || !this._doc || this._doc.readOnly) return;
+            if (this._destroyed || this._frozen || !this._doc || this._doc.readOnly) return;
             this._doc.updatedAt = Date.now();
 
             if (this._saveTimer) return;
@@ -272,7 +322,7 @@
         _handOff() {
             // The backstop for readOnly. markDirty() already declines to schedule a save,
             // but flush() and handOffForUnload() call this directly.
-            if (!this._doc || this._doc.readOnly) return;
+            if (this._frozen || !this._doc || this._doc.readOnly) return;
             const doc = this._doc;
             EaselStore.queueSave(doc.id, JSON.stringify({
                 version: DOC_VERSION,
@@ -300,6 +350,7 @@
 
         // Resolves once this page's work is on disk.
         async flush() {
+            if (this._frozen) return;
             this._cancelPendingSave();
             this._handOff();
             // Forced: every caller of flush() is finishing with a board — switching away
@@ -321,7 +372,7 @@
             const doc = this._doc;
             // readOnly: the board on screen is a partial view of the file, so a thumbnail
             // rasterised from it would misrepresent the easel in the library.
-            if (!doc || this._destroyed || doc.readOnly) return;
+            if (!doc || this._destroyed || this._frozen || doc.readOnly) return;
 
             const renderer = this.host.renderer;
             if (!renderer || typeof renderer.snapshot !== "function") return;
@@ -355,6 +406,7 @@
         // guarantee from here, whether the browser is quitting or just closing a tab.
         handOffForUnload() {
             this._cancelPendingSave();
+            if (this._frozen) return;
             this._handOff();
         }
 

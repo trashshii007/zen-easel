@@ -12,7 +12,7 @@ export class ZenEaselLiveParent extends JSWindowActorParent {
     receiveMessage(message) {
         switch (message.name) {
             case "ZenEaselLive:OpenLink":
-                this.#openLink(message.data?.url);
+                this.#openLink(message.data);
                 break;
             case "ZenEaselLive:ContextMenu":
                 this.#showEaselMenu(message.data);
@@ -64,8 +64,8 @@ export class ZenEaselLiveParent extends JSWindowActorParent {
         }
     }
 
-    #openLink(rawUrl) {
-        const url = safeExternalUrl(rawUrl);
+    #openLink(data) {
+        const url = safeExternalUrl(data?.url);
         if (!url) return;
 
         // The tile is embedded directly in the browser window's chrome document, so its
@@ -74,7 +74,17 @@ export class ZenEaselLiveParent extends JSWindowActorParent {
             this.browsingContext?.topChromeWindow;
         if (!chrome || !chrome.gBrowser) return;
 
+        // Where the click was, for the overlay to grow out of. Content-supplied and used
+        // for nothing but an animation; the host is what decides whether it is usable.
+        const origin = { screenX: data?.screenX, screenY: data?.screenY };
+
+        // Same door as the card's "Open source page" button: Glance when it is
+        // available, a tab when it is not. The host owns that choice.
         try {
+            if (chrome.gZenEaselHost?.openUrl) {
+                chrome.gZenEaselHost.openUrl(url, origin);
+                return;
+            }
             chrome.gBrowser.selectedTab = chrome.gBrowser.addTab(url, {
                 triggeringPrincipal: Services.scriptSecurityManager.createNullPrincipal({}),
                 inBackground: false
