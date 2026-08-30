@@ -497,7 +497,17 @@
 
         async reloadFromDisk() {
             if (!this.store) return;
-            const doc = await this.store.reloadFromDisk();
+            this._applyReloaded(await this.store.reloadFromDisk());
+        }
+
+        // The unprompted half of reloadFromDisk: reads only when the file has moved on
+        // without this page. See store's refreshIfStale.
+        async refreshIfStale() {
+            if (!this.store) return;
+            this._applyReloaded(await this.store.refreshIfStale());
+        }
+
+        _applyReloaded(doc) {
             if (!doc) return;
             this.canvas?.setDocument(doc);
             this.library?.refresh();
@@ -587,6 +597,10 @@
 
         async reloadFromDisk() {
             if (this.element) await this.element.reloadFromDisk();
+        }
+
+        async refreshIfStale() {
+            if (this.element) await this.element.refreshIfStale();
         }
 
         // Called by ZenEaselLiveParent when a right-click lands inside a live card. The
@@ -683,6 +697,11 @@
                 // Zen's theme may have moved while this board was away — switching workspace is
                 // the usual way — and nothing in this document would otherwise say so.
                 try { this.element?._syncZenColors(); } catch (e) { console.error(e); }
+                // So may the file. A capture taken from another workspace is written by a
+                // glance satellite over there, and this copy has to notice before it can be
+                // edited — an edit would save the older board straight over the capture.
+                this.element?.refreshIfStale()
+                    ?.catch(e => console.error("[zen-easel] could not refresh the board:", e));
             }
         }
 

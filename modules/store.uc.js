@@ -293,6 +293,35 @@
             return this._doc;
         }
 
+        // The same board written by somebody else while this page was not looking.
+        //
+        // freezeWrites / reloadFromDisk is the arranged handover, and it is driven from the
+        // chrome window: it needs the original's tab to be found, its page to be reachable,
+        // and the satellite's close to be noticed. In another workspace none of those are
+        // certain — the pin may be discarded when the freeze goes out, the overlay may end
+        // in a way that fires nothing — and a page that missed the handover holds a copy
+        // older than the file and overwrites it on the next stroke.
+        //
+        // So the page settles it without being told. Every write puts its updatedAt in the
+        // index, so a copy that is behind the index is a copy that has been overtaken.
+        // Called when the board comes back into view, which is before it can be edited.
+        async refreshIfStale() {
+            if (this._destroyed || !this._doc) return null;
+            // A save of our own is still pending, so this copy is the newer one — the
+            // index is only behind because the debounce has not fired yet.
+            if (this._saveTimer) return null;
+
+            const entries = await EaselStore.listEasels();
+            const entry = entries.find(e => e.id === this._doc.id);
+            if (!entry || !(entry.updatedAt > (this._doc.updatedAt || 0))) return null;
+
+            // Frozen for the duration of the read for the reason reloadFromDisk thaws
+            // last: a mutation arriving mid-read must not schedule a save of the copy
+            // that is about to be discarded.
+            this._frozen = true;
+            return this.reloadFromDisk();
+        }
+
         // Runs on every mutation, which includes every frame of a pan or zoom. The
         // debounce is here rather than in the background module specifically so that
         // JSON.stringify happens once per settled gesture instead of once per frame.

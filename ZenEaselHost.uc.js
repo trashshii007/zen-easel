@@ -203,6 +203,11 @@
                 } catch (e) { continue; }
                 for (const tab of tabs) {
                     if (exclude && tab.linkedBrowser === exclude) continue;
+                    // The overlay is a second view of a board, not "the" easel tab.
+                    // After a botched Glance, a leftover zen-glance-tab still matches
+                    // ?easel= and would be returned first — claimEasel then refuses
+                    // every later satellite because other is itself a glance.
+                    if (tab.hasAttribute("zen-glance-tab")) continue;
                     if (this._matchEaselTab(tab, easelId)) return { win, tab };
                 }
             }
@@ -248,14 +253,13 @@
             // glance=1 is on the URL we handed addTab, so it is present even when
             // this runs before Glance has stamped zen-glance-tab. The other tab is
             // the original we meant to leave in place — not a second glance.
-            if (this._isGlanceSatellite(browser, newTab, easelId) &&
-                other.tab && !other.tab.hasAttribute("zen-glance-tab")) {
+            if (this._isGlanceSatellite(browser, newTab, easelId) && other.tab) {
                 this._pendingGlanceEaselId = null;
-                this._freezeResident(other);
+                this._freezeViews(easelId, newTab || browser);
                 // The tab object is often still missing here — Glance has not
                 // appended it yet. Remember the original and arm once we have it.
                 this._pendingSatelliteResident = other;
-                this._armSatellite(newTab, other);
+                this._armSatellite(newTab, other, easelId);
                 log("glance satellite allowed for the open easel");
                 return true;
             }
@@ -266,9 +270,11 @@
         }
 
         _isGlanceSatellite(browser, tab, easelId) {
-            if (tab?.hasAttribute("zen-glance-tab") || tab?.hasAttribute("glance-id")) {
-                return true;
-            }
+            // glance-id is stamped on the parent as well. That tab is the original,
+            // not the overlay — treating it as a satellite made a pin that Glance
+            // had touched look like the newcomer, so claimEasel closed it or froze
+            // the wrong page.
+            if (tab?.hasAttribute("zen-glance-tab")) return true;
             if (this._pendingGlanceEaselId && this._pendingGlanceEaselId === easelId) {
                 return true;
             }
@@ -289,13 +295,53 @@
             }
         }
 
-        _freezeResident(hit) {
-            this._markEaselStale(hit?.tab);
-            try {
-                this._pageFor(hit?.tab)?.freezeWrites();
-            } catch (e) {
-                console.error("[zen-easel] could not freeze the pinned easel:", e);
+        // Every tab holding this board, anywhere, except the one asking. _findEaselTabAnywhere
+        // answers with the first it meets, which is the right answer for "may I keep this
+        // board" and the wrong one for "who else has a copy of it": a session that has been
+        // through a botched glance can have more than one, and the copy that is left out is
+        // the copy that overwrites the file later.
+        //
+        // `exclude` is a tab or the browser of one, because claimEasel runs before Glance
+        // has a tab object to name.
+        _eachEaselView(easelId, exclude, fn) {
+            if (!easelId) return;
+            let windows;
+            try { windows = Services.wm.getEnumerator("navigator:browser"); } catch (e) { return; }
+            for (const win of windows) {
+                let tabs;
+                try {
+                    if (win.closed || !win.gBrowser) continue;
+                    tabs = win.gBrowser.tabs;
+                } catch (e) { continue; }
+                for (const tab of tabs) {
+                    if (tab.closing || tab === exclude || tab.linkedBrowser === exclude) continue;
+                    if (!this._matchEaselTab(tab, easelId)) continue;
+                    try {
+                        fn({ win, tab });
+                    } catch (e) {
+                        console.error("[zen-easel] could not reach a view of the easel:", e);
+                    }
+                }
             }
+        }
+
+        // The satellite is about to become this board's writer, so no other copy of it may
+        // reach disk until the satellite has finished and they have re-read the file.
+        _freezeViews(easelId, exclude) {
+            this._eachEaselView(easelId, exclude, hit => {
+                // Always stale, freeze or no freeze: a pin in another space may have no
+                // page to freeze right now, and GlanceClose may never run against a hidden
+                // tab. _onTabSelect reloads the file the next time that tab is shown, and
+                // the page's own refreshIfStale covers the rest.
+                this._markEaselStale(hit.tab);
+                this._pageFor(hit.tab)?.freezeWrites();
+            });
+        }
+
+        async _reloadViews(easelId, exclude) {
+            const hits = [];
+            this._eachEaselView(easelId, exclude, hit => hits.push(hit));
+            for (const hit of hits) await this._reloadResident(hit);
         }
 
         // The satellite is gone; the original is unfrozen and reloaded from the file the
@@ -312,7 +358,7 @@
         //
         // Expand also breaks one-tab-per-easel, so it is resolved the same way claimEasel
         // resolves every other duplicate: the newcomer goes and the original is focused.
-        _armSatellite(glanceTab, residentHit) {
+        _armSatellite(glanceTab, residentHit, easelId = null) {
             if (!glanceTab || !residentHit) return;
             // Called twice for one overlay: claimEasel arms it as the satellite's page
             // boots, which happens while _openEaselForCapture is still awaiting openGlance,
@@ -330,8 +376,8 @@
             // board unwritable.
             this._disarmSatellite({ finish: true });
 
-            const onGone = () => this._completeSatellite(residentHit, glanceTab);
-            const onExpanded = () => this._expandSatellite(residentHit, glanceTab);
+            const onGone = () => this._completeSatellite(residentHit, glanceTab, easelId);
+            const onExpanded = () => this._expandSatellite(residentHit, glanceTab, easelId);
 
             glanceTab.addEventListener("GlanceClose", onGone, { once: true });
             glanceTab.addEventListener("TabClose", onGone, { once: true });
@@ -344,7 +390,7 @@
             });
             observer.observe(glanceTab, { attributes: true, attributeFilter: ["zen-glance-tab"] });
 
-            this._satellite = { glanceTab, residentHit, onGone, observer };
+            this._satellite = { glanceTab, residentHit, easelId, onGone, observer };
             this._pendingSatelliteResident = null;
         }
 
@@ -359,7 +405,7 @@
             try { armed.glanceTab.removeEventListener("GlanceClose", armed.onGone); } catch (e) { }
             try { armed.glanceTab.removeEventListener("TabClose", armed.onGone); } catch (e) { }
             if (finish) {
-                this._completeSatellite(armed.residentHit, armed.glanceTab)
+                this._completeSatellite(armed.residentHit, armed.glanceTab, armed.easelId)
                     .catch(e => console.error("[zen-easel] could not release the previous easel:", e));
             }
             return armed;
@@ -381,20 +427,25 @@
             }
         }
 
-        async _completeSatellite(residentHit, glanceTab) {
+        async _completeSatellite(residentHit, glanceTab, easelId = null) {
             this._disarmSatellite();
             await this._flushSatellite(glanceTab);
-            await this._reloadResident(residentHit);
+            // Every copy, not only the one that was recorded when the satellite opened:
+            // the freeze went out to all of them, and a copy left frozen is a board that
+            // silently stops saving.
+            if (easelId) await this._reloadViews(easelId, glanceTab);
+            else await this._reloadResident(residentHit);
         }
 
         // Expand, which Glance performs by quietly turning the overlay into an ordinary
         // tab. Two tabs on one document is the state the whole design assumes away — see
         // claimEasel — so it is settled the way claimEasel settles it: the satellite's work
         // goes to disk, the satellite closes, and the original is reloaded and focused.
-        async _expandSatellite(residentHit, glanceTab) {
+        async _expandSatellite(residentHit, glanceTab, easelId = null) {
             this._disarmSatellite();
             await this._flushSatellite(glanceTab);
-            await this._reloadResident(residentHit);
+            if (easelId) await this._reloadViews(easelId, glanceTab);
+            else await this._reloadResident(residentHit);
             try {
                 if (glanceTab && !glanceTab.closing) {
                     glanceTab.ownerGlobal.gBrowser.removeTab(glanceTab, { animate: true });
@@ -413,8 +464,16 @@
 
         _onTabSelect() {
             const tab = gBrowser.selectedTab;
-            if (!this._staleEaselTabs?.has(tab)) return;
-            this._reloadResident({ win: window, tab });
+            if (this._staleEaselTabs?.has(tab)) {
+                this._reloadResident({ win: window, tab });
+                return;
+            }
+            // Nothing marked this tab, which does not mean nothing has written its board:
+            // a satellite in another window, or one whose close was never noticed here.
+            // The page only reads when its own copy is behind the index, so asking on
+            // every tab switch costs a lookup.
+            this._pageFor(tab)?.refreshIfStale?.()
+                ?.catch(e => console.error("[zen-easel] could not refresh the easel:", e));
         }
 
         // The original is asked to re-read its own file — the page owns hydration, the blob
@@ -677,8 +736,8 @@
                 || this._openLocalSatellite(easelId);
             if (!tab) return null;
             const resident = this._pendingSatelliteResident || residentHit;
-            this._freezeResident(resident);
-            this._armSatellite(tab, resident);
+            this._freezeViews(easelId, tab);
+            this._armSatellite(tab, resident, easelId);
             return tab;
         }
 
@@ -766,7 +825,14 @@
             // A missing id is openEasel(null) — "whichever board" — and Glance needs a
             // concrete URL. The toolbar already refuses to create a second copy that
             // way; so do we.
-            if (!easelId || !this._glanceIsAvailable()) return null;
+            if (!easelId) return null;
+            const current = this._currentGlanceTab();
+            if (current) {
+                // Reuse an overlay that is already this board — including a leftover
+                // from a previous capture. A different glance is someone else's.
+                return this._matchEaselTab(current, easelId) ? current : null;
+            }
+            if (!this._glanceIsAvailable()) return null;
 
             this._pendingGlanceEaselId = easelId;
             let tab;
