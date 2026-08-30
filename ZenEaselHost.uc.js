@@ -574,6 +574,14 @@
                 return;
             }
 
+            // Glance has already committed the 80% overlay by the time openGlance
+            // resolved. The page often measured itself during addTab, at full tab
+            // size; sync before the capture is placed so the screenshot lands on
+            // the overlay's board, not the one that was never shown.
+            if (tab.hasAttribute("zen-glance-tab")) {
+                try { await page.syncToContainer(); } catch (e) { }
+            }
+
             // No switch to wait on any more, and that removes a race rather than ignoring
             // it. This used to await an in-place easel switch, because openEasel could only
             // *start* one: picking a board other than the one already open dropped the

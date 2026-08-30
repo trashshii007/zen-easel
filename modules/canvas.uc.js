@@ -183,57 +183,7 @@
 
             if (typeof ResizeObserver === "function") {
                 this._resizeObserver = new ResizeObserver(() => {
-                    const resized = this.renderer.resize();
-                    if (!resized) return;
-
-                    // In Arc's verticallyScrolling mode the document *is* the window width,
-                    // so a resize relays the board out rather than just re-clamping it.
-                    const reflowed = this._reflowToCanvasWidth();
-
-                    // A narrower window changes where the page edges fall.
-                    const view = this.view;
-                    const before = { zoom: view.zoom, panX: view.panX, panY: view.panY };
-                    this._clampView();
-                    const moved = view.zoom !== before.zoom ||
-                        view.panX !== before.panX || view.panY !== before.panY;
-
-                    // A resize that only moved the viewport *within* the canvas already
-                    // drawn is not painted at all — nothing cleared, nothing redrawn,
-                    // nothing reallocated. In a split-divider drag that is every frame but
-                    // the first, in both directions.
-                    //
-                    // Repainting was the whole of the risk. The flicker survived painting in
-                    // this callback rather than scheduling it, and survived dropping the
-                    // per-frame reallocation of the backing stores; what is left is a frame
-                    // composited after the canvas was emptied and before the drawing landed,
-                    // which is a race this side does not get to see, let alone win. So it is
-                    // not raced. It is made unnecessary.
-                    //
-                    // What makes it unnecessary: the board is drawn from the viewport's own
-                    // origin at a scale a resize does not change, out to the edge of a
-                    // backing store that is deliberately larger than the viewport and only
-                    // ever grows (renderer.resize, _viewportBounds). Every pixel the
-                    // viewport can move over is therefore already the pixel that belongs
-                    // there — shrinking shows less of the picture, growing shows more of it,
-                    // and .easel-viewport's overflow:hidden was doing the clipping either
-                    // way.
-                    //
-                    // The three conditions are what keep that true rather than nearly true:
-                    // a reallocation has just emptied the canvas, and a reflow or a clamped
-                    // view changes what belongs on it. Any of them and the repaint has to be
-                    // now, on this frame — observations are delivered after the frame's
-                    // animation callbacks and before it composites, so scheduling one would
-                    // compose exactly the empty frame this comment is about. See repaintNow.
-                    if (resized.reallocated || reflowed || moved) {
-                        this.repaintNow();
-                        return;
-                    }
-
-                    // Nothing on screen is waiting, but _paintNow also drives the things
-                    // that read the viewport's size — the live layer's offscreen test above
-                    // all — and those should not sit out a whole gesture. One paint once it
-                    // stops moving, when a redraw is safe again because nothing is resizing.
-                    this._scheduleResizeSettle();
+                    this._applyViewportSize();
                 });
                 this._resizeObserver.observe(this.root);
             }
@@ -301,6 +251,11 @@
 
             this.root.classList.toggle("is-empty-document", !doc);
             this.renderer.resize();
+            // lastLaidOutAtCanvasWidth is a property of the file, not of this window.
+            // Opening in a narrower overlay (Glance) or a wider tab has to rescale
+            // here: the ResizeObserver only reflows when the viewport *moves*, and
+            // the first layout of a new tab is often already the size we will keep.
+            this._reflowToCanvasWidth();
             this._clampView();       // a saved viewport may predate the page bounds
             this._applyBackground();
 
@@ -742,6 +697,77 @@
             this._staticDirty = true;
             this._paint.cancel();
             this._paintNow();
+        }
+
+        // The viewport changed size. Shared by the ResizeObserver and by anything that
+        // knows the chrome around this page moved without a content resize event —
+        // Glance writing its 80% overlay is the one we actually have.
+        //
+        // forceReflow still compares lastLaidOutAtCanvasWidth even when renderer.resize()
+        // saw no movement: a board that loaded at the full-tab size, then had Glance
+        // shrink the box around it, is the case where the observer never fires and the
+        // file's layout width is the only record that anything is wrong.
+        _applyViewportSize({ forceReflow = false } = {}) {
+            const resized = this.renderer.resize();
+            if (!resized && !forceReflow) return false;
+
+            // In Arc's verticallyScrolling mode the document *is* the window width,
+            // so a resize relays the board out rather than just re-clamping it.
+            const reflowed = this._reflowToCanvasWidth();
+            const view = this.view;
+            let moved = false;
+            if (view) {
+                const before = { zoom: view.zoom, panX: view.panX, panY: view.panY };
+                this._clampView();
+                moved = view.zoom !== before.zoom ||
+                    view.panX !== before.panX || view.panY !== before.panY;
+            }
+
+            // A resize that only moved the viewport *within* the canvas already
+            // drawn is not painted at all — nothing cleared, nothing redrawn,
+            // nothing reallocated. In a split-divider drag that is every frame but
+            // the first, in both directions.
+            //
+            // Repainting was the whole of the risk. The flicker survived painting in
+            // this callback rather than scheduling it, and survived dropping the
+            // per-frame reallocation of the backing stores; what is left is a frame
+            // composited after the canvas was emptied and before the drawing landed,
+            // which is a race this side does not get to see, let alone win. So it is
+            // not raced. It is made unnecessary.
+            //
+            // What makes it unnecessary: the board is drawn from the viewport's own
+            // origin at a scale a resize does not change, out to the edge of a
+            // backing store that is deliberately larger than the viewport and only
+            // ever grows (renderer.resize, _viewportBounds). Every pixel the
+            // viewport can move over is therefore already the pixel that belongs
+            // there — shrinking shows less of the picture, growing shows more of it,
+            // and .easel-viewport's overflow:hidden was doing the clipping either
+            // way.
+            //
+            // The three conditions are what keep that true rather than nearly true:
+            // a reallocation has just emptied the canvas, and a reflow or a clamped
+            // view changes what belongs on it. Any of them and the repaint has to be
+            // now, on this frame — observations are delivered after the frame's
+            // animation callbacks and before it composites, so scheduling one would
+            // compose exactly the empty frame this comment is about. See repaintNow.
+            if (resized?.reallocated || reflowed || moved) {
+                this.repaintNow();
+                return true;
+            }
+
+            // Nothing on screen is waiting, but _paintNow also drives the things
+            // that read the viewport's size — the live layer's offscreen test above
+            // all — and those should not sit out a whole gesture. One paint once it
+            // stops moving, when a redraw is safe again because nothing is resizing.
+            if (resized) this._scheduleResizeSettle();
+            return !!(resized || reflowed);
+        }
+
+        // Glance (and any other chrome overlay) has committed a new box around this
+        // page. The ResizeObserver may never see it: about:easel boots during addTab,
+        // at full tab size, and Glance often freezes the docshell for the animation.
+        syncToContainer() {
+            return this._applyViewportSize({ forceReflow: true });
         }
 
         // The catch-up paint for a shrink that correctly did nothing. Debounced, so a drag
