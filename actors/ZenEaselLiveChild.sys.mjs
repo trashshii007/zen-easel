@@ -327,6 +327,10 @@ export class ZenEaselLiveChild extends JSWindowActorChild {
         // href is resolved against the document, so this is an absolute URL — but it is
         // still content-controlled, and the parent re-validates the scheme before doing
         // anything with it.
-        this.sendAsyncMessage("ZenEaselLive:OpenLink", { url: anchor.href });
+        this.sendAsyncMessage("ZenEaselLive:OpenLink", {
+            url: anchor.href,
+            screenX: event.screenX,
+            screenY: event.screenY
+        });
     }
 }

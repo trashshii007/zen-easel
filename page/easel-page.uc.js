@@ -314,6 +314,23 @@
             if (this.store) await this.store.flush();
         }
 
+        // A glance satellite is about to write this board. This page's copy must not
+        // autosave over it, and its live layer should stop painting — the satellite
+        // will attach to the same tiles.
+        freezeWrites() {
+            try { this.store?.freezeWrites(); } catch (e) { }
+            try { this.live?.background(); } catch (e) { }
+        }
+
+        async reloadFromDisk() {
+            if (!this.store) return;
+            const doc = await this.store.reloadFromDisk();
+            if (!doc) return;
+            this.canvas?.setDocument(doc);
+            this.library?.refresh();
+            this._syncTabIdentity();
+        }
+
         teardown() {
             for (const part of [
                 this.live, this.media, this.textEditor, this.textControls, this.shapeControls,
@@ -377,6 +394,12 @@
             if (!this.element) return;
             await this.element._bootPromise;
             await this.element.capture.addCaptureToDocument(result);
+        }
+
+        freezeWrites() { this.element?.freezeWrites(); }
+
+        async reloadFromDisk() {
+            if (this.element) await this.element.reloadFromDisk();
         }
 
         // Called by ZenEaselLiveParent when a right-click lands inside a live card. The
