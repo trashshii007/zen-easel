@@ -1,8 +1,8 @@
 /* Zen Easel — global chrome styles.
  *
  * Only what must live outside the easel's own shadow root: the toolbar button, the bundled
- * @font-face rules, the split-view workaround, the send-to-easel menu, and the live-card
- * bar.
+ * @font-face rules, the split-view workaround, the send-to-easel menu, the live-card
+ * bar, and the Glance expand icon when that button means "go to the easel".
  *
  * The region-capture overlay's rules used to be here too. They went with the picker they
  * styled — captures now start in Zen's own screenshot overlay, which brings its own. The
@@ -23,6 +23,19 @@
 
 #zen-easel-button:hover .toolbarbutton-icon {
   opacity: 1;
+}
+
+/* Glance's own rule is `list-style-image: url(fullscreen.svg) !important` on
+   .zen-glance-sidebar-open. This class is stamped only when the overlay is a
+   second view of a board that already has a tab — expand then switches to that
+   tab — so the fullscreen glyph would be a lie. A glance that *is* the board
+   (not pinned, not already open) is left alone.
+   Colour comes from the button itself (`color: var(--zen-primary-color)`);
+   we only swap the image and enable context-fill. */
+.zen-glance-sidebar-open.zen-easel-go-to-board,
+.zen-glance-sidebar-open.zen-easel-go-to-board > .toolbarbutton-icon {
+  list-style-image: url("chrome://sine/content/zen-easel/resources/zen-easel-go-to-board.svg") !important;
+  -moz-context-properties: fill, fill-opacity;
 }
 
 /* Arc's own Easel typefaces, limited to the openly licensed ones — see
