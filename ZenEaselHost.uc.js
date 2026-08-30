@@ -443,8 +443,10 @@
             this._staleEaselTabs?.delete(hit.tab);
         }
 
-        // Finds the tab showing a given easel *in this window*, or any easel tab when id is
-        // null. Cross-window callers want _findEaselTabAnywhere.
+        // Finds the tab showing a given easel *in this workspace*, or any easel tab
+        // here when id is null. Pins in another space are still in gBrowser.tabs —
+        // hidden, often discarded — and are not "here". Cross-space and cross-window
+        // callers want _findEaselTabAnywhere.
         //
         // With no id this is "the easel tab" in the loose sense the toolbar button and the
         // shortcut mean, and it answers with the most recently selected one rather than
@@ -457,11 +459,25 @@
             for (const tab of gBrowser.tabs) {
                 // A glance satellite is a second view of a board, not "the" easel tab.
                 if (tab.hasAttribute("zen-glance-tab")) continue;
+                if (!this._tabIsInActiveWorkspace(tab)) continue;
                 if (!this._matchEaselTab(tab, easelId)) continue;
                 if (easelId) return tab;
                 if (!best || (tab.lastAccessed || 0) > (best.lastAccessed || 0)) best = tab;
             }
             return best;
+        }
+
+        // Essentials belong to every space. Everything else is here iff its
+        // zen-workspace-id is the active one — the same test Zen uses when a pin is
+        // dragged between spaces. Hidden-without-an-id is the fallback for a window
+        // that is not running workspaces at all.
+        _tabIsInActiveWorkspace(tab) {
+            if (!tab || tab.closing) return false;
+            if (tab.hasAttribute("zen-essential")) return true;
+            let active;
+            try { active = window.gZenWorkspaces?.activeWorkspace; } catch (e) { active = null; }
+            if (!active) return !tab.hidden;
+            return tab.getAttribute("zen-workspace-id") === active;
         }
 
         // Looked up fresh every time rather than cached: a cached page reference would
@@ -612,7 +628,8 @@
         //
         // A board that already has a tab gets a *second* glance tab, not a wrap
         // of the original. The original is frozen so it cannot overwrite the
-        // capture, and is reloaded from disk when the glance closes.
+        // capture, and is reloaded from disk when the glance closes. A pin in
+        // another workspace is that case too: the satellite lives here.
         async _openForCapture(target, capture) {
             if (target === "new") {
                 const { EaselStore } =
@@ -629,26 +646,60 @@
                 if (existing) {
                     if (existing === gBrowser.selectedTab) return existing;
                     if (this._shouldGlanceExisting(existing)) {
-                        const glanced = await this._openEaselInGlance(easelId, capture);
-                        if (glanced) {
-                            const resident = this._pendingSatelliteResident ||
-                                { win: window, tab: existing };
-                            this._freezeResident(resident);
-                            this._armSatellite(glanced, resident);
-                            return glanced;
-                        }
+                        const satellite = await this._openSatelliteOf(
+                            { win: window, tab: existing }, easelId, capture);
+                        if (satellite) return satellite;
                     }
                     gBrowser.selectedTab = existing;
                     return existing;
                 }
+                // Open in another space or window. Selecting that tab would leave
+                // this workspace and, for a discarded pin, never receive the capture.
+                // Write it here on a satellite; the original reloads the file later.
                 const elsewhere = this._findEaselTabAnywhere(easelId);
-                if (elsewhere) return this._focusEaselTab(elsewhere);
+                if (elsewhere) {
+                    const satellite = await this._openSatelliteOf(elsewhere, easelId, capture);
+                    if (satellite) return satellite;
+                }
             }
 
             const glanced = await this._openEaselInGlance(easelId, capture);
             if (glanced) return glanced;
 
             return this.openEasel(easelId);
+        }
+
+        // A second view of a board that is already open somewhere we must not switch
+        // to. Glance is the overlay; a full tab with glance=1 is the same satellite
+        // as far as claimEasel is concerned, used only when Glance cannot open.
+        async _openSatelliteOf(residentHit, easelId, capture) {
+            const tab = (await this._openEaselInGlance(easelId, capture))
+                || this._openLocalSatellite(easelId);
+            if (!tab) return null;
+            const resident = this._pendingSatelliteResident || residentHit;
+            this._freezeResident(resident);
+            this._armSatellite(tab, resident);
+            return tab;
+        }
+
+        _openLocalSatellite(easelId) {
+            if (!easelId) return null;
+            this._pendingGlanceEaselId = easelId;
+            try {
+                const tab = gBrowser.addTab(easelPageUrl(easelId, { glance: true }), {
+                    triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal(),
+                    inBackground: false,
+                    skipAnimation: true
+                });
+                gBrowser.selectedTab = tab;
+                try { gBrowser.setIcon(tab, BASE + "resources/zen-easel-board.svg"); } catch (e) { }
+                return tab;
+            } catch (e) {
+                console.error("[zen-easel] could not open a local view of the easel:", e);
+                return null;
+            } finally {
+                this._pendingGlanceEaselId = null;
+            }
         }
 
         _shouldGlanceExisting(tab) {
