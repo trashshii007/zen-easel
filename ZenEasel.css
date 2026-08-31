@@ -69,7 +69,6 @@
   --easel-accent-soft: light-dark(rgba(108, 78, 224, 0.13), rgba(169, 146, 255, 0.20));
   --easel-accent-strong: light-dark(#5b3fd0, #c3b2ff);
   --easel-tool-ink: light-dark(#4a4458, #d6d2e0);
-  --easel-radius: 12px;
 
   /* One easing for everything, so panels, tools and popups feel like one system. */
   --easel-ease: cubic-bezier(0.22, 1, 0.36, 1);
@@ -146,7 +145,6 @@
      the transparency would buy nothing. The viewport is the single painter of the
      board's colour; the topbar paints its own. */
   background: transparent;
-  border-radius: var(--easel-radius);
   box-sizing: border-box;
 }
 

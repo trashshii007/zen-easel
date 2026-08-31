@@ -118,6 +118,10 @@
 
                 this.viewport.focus({ preventScroll: true });
 
+                // Before _boot: GlanceOpen can fire while the store is still opening,
+                // and the listener has to already be on the tab or we miss the only
+                // signal that the overlay has its real size.
+                this._armGlanceSync();
                 this._bootPromise = this._boot();
             } catch (e) {
                 console.error("[zen-easel] failed to build the page:", e);
@@ -161,6 +165,14 @@
                 this.canvas.setDocument(doc);
                 this.library.refresh();
                 this._syncTabIdentity();
+
+                // Boot may have finished after Glance already wrote has-finished-animation
+                // (openGlance resolves at the same moment it fires GlanceOpen). The
+                // listener would have set _glanceSyncPending with no document to apply
+                // it to; do it now that there is one.
+                if (this._glanceSyncPending || this._glanceOverlaySettled()) {
+                    this._syncGlanceViewport();
+                }
 
                 // Reclaiming orphaned assets is housekeeping, not part of opening an
                 // easel: it is rate-limited to once a day internally, and deferred to
@@ -320,6 +332,89 @@
             }
         }
 
+        /* --------------------------------------------------------------- glance */
+
+        // Glance is a chrome overlay, not a smaller content window. about:easel boots
+        // during addTab — full tab-panels size — and Glance then restyles the wrapper
+        // to 80% and often freezes the docshell for the arc animation. The canvas
+        // ResizeObserver never sees that shrink, so the board keeps the dimensions it
+        // measured on the first layout.
+        //
+        // GlanceOpen is the committed-size signal; has-finished-animation is the same
+        // moment in CSS, used both as a backup if we attached too late and as the
+        // "already settled" test when boot finishes after openGlance has resolved.
+        _armGlanceSync() {
+            this._onGlanceOpen = () => this._syncGlanceViewport();
+            const browser = window.browsingContext?.embedderElement;
+            const chrome = this.chromeWindow;
+            if (!browser) return;
+
+            if (chrome?.gBrowser) {
+                try {
+                    const tab = chrome.gBrowser.getTabForBrowser(browser);
+                    if (tab) {
+                        tab.addEventListener("GlanceOpen", this._onGlanceOpen);
+                        this._glanceTab = tab;
+                    }
+                } catch (e) { }
+            }
+
+            const wrapper = browser.closest(".browserContainer");
+            if (wrapper && typeof MutationObserver === "function") {
+                this._glanceWrapper = wrapper;
+                this._glanceWrapperObserver = new MutationObserver(() => {
+                    if (this._glanceOverlaySettled()) this._syncGlanceViewport();
+                });
+                this._glanceWrapperObserver.observe(wrapper, {
+                    attributes: true,
+                    attributeFilter: ["has-finished-animation", "animate"]
+                });
+            }
+
+            if (this._glanceOverlaySettled()) this._syncGlanceViewport();
+        }
+
+        _glanceOverlaySettled() {
+            const wrapper = this._glanceWrapper ||
+                window.browsingContext?.embedderElement?.closest(".browserContainer");
+            return !!(wrapper && wrapper.hasAttribute("has-finished-animation"));
+        }
+
+        _syncGlanceViewport() {
+            if (!this.canvas) return;
+            if (!this.canvas.doc) {
+                this._glanceSyncPending = true;
+                return;
+            }
+            this._glanceSyncPending = false;
+            this.canvas.syncToContainer();
+            // Glance writes the overlay box in the same turn as GlanceOpen. An
+            // in-process about: page can lag one frame behind that chrome CSS change,
+            // especially if the docshell was inactive for the animation.
+            if (this._glanceSyncFrame) return;
+            this._glanceSyncFrame = window.requestAnimationFrame(() => {
+                this._glanceSyncFrame = 0;
+                this.canvas?.syncToContainer();
+            });
+        }
+
+        _disarmGlanceSync() {
+            if (this._glanceSyncFrame) {
+                window.cancelAnimationFrame(this._glanceSyncFrame);
+                this._glanceSyncFrame = 0;
+            }
+            if (this._glanceTab && this._onGlanceOpen) {
+                try { this._glanceTab.removeEventListener("GlanceOpen", this._onGlanceOpen); } catch (e) { }
+            }
+            if (this._glanceWrapperObserver) {
+                try { this._glanceWrapperObserver.disconnect(); } catch (e) { }
+            }
+            this._glanceTab = null;
+            this._glanceWrapper = null;
+            this._glanceWrapperObserver = null;
+            this._onGlanceOpen = null;
+        }
+
         /* --------------------------------------------------------------- topbar */
 
         // Read from the pref rather than util's cache: the two observers fire in no
@@ -402,7 +497,17 @@
 
         async reloadFromDisk() {
             if (!this.store) return;
-            const doc = await this.store.reloadFromDisk();
+            this._applyReloaded(await this.store.reloadFromDisk());
+        }
+
+        // The unprompted half of reloadFromDisk: reads only when the file has moved on
+        // without this page. See store's refreshIfStale.
+        async refreshIfStale() {
+            if (!this.store) return;
+            this._applyReloaded(await this.store.refreshIfStale());
+        }
+
+        _applyReloaded(doc) {
             if (!doc) return;
             this.canvas?.setDocument(doc);
             this.library?.refresh();
@@ -410,6 +515,7 @@
         }
 
         teardown() {
+            this._disarmGlanceSync();
             if (this._topbarObserver) {
                 try { Services.prefs.removeObserver(TOPBAR_PREF, this._topbarObserver); } catch (e) { }
                 this._topbarObserver = null;
@@ -478,10 +584,23 @@
             await this.element.capture.addCaptureToDocument(result);
         }
 
+        // The overlay has its real size. Used by the host after openGlance resolves,
+        // which is after GlanceOpen — the page's own listener may already have run,
+        // or boot may still have been in flight.
+        async syncToContainer() {
+            if (!this.element) return;
+            await this.element._bootPromise;
+            this.element._syncGlanceViewport();
+        }
+
         freezeWrites() { this.element?.freezeWrites(); }
 
         async reloadFromDisk() {
             if (this.element) await this.element.reloadFromDisk();
+        }
+
+        async refreshIfStale() {
+            if (this.element) await this.element.refreshIfStale();
         }
 
         // Called by ZenEaselLiveParent when a right-click lands inside a live card. The
@@ -593,6 +712,11 @@
                 // Zen's theme may have moved while this board was away — switching workspace is
                 // the usual way — and nothing in this document would otherwise say so.
                 try { this.element?._syncZenColors(); } catch (e) { console.error(e); }
+                // So may the file. A capture taken from another workspace is written by a
+                // glance satellite over there, and this copy has to notice before it can be
+                // edited — an edit would save the older board straight over the capture.
+                this.element?.refreshIfStale()
+                    ?.catch(e => console.error("[zen-easel] could not refresh the board:", e));
             }
         }
 

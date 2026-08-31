@@ -314,11 +314,23 @@
                     // of the chrome document out of the middle of Zen's drag, once a frame
                     // per board, to move something nobody can see. The reveal repositions.
                     if (board.resizing) return;
-                    this._positionLayer(board);
+                    this._syncLayerToOwner(board);
                 });
                 board.resizeObserver.observe(ownerBrowser);
             }
-            this._positionLayer(board);
+            this._syncLayerToOwner(board);
+        }
+
+        // Glance's open animation scales the wrapper with a transform. Following
+        // getBoundingClientRect through that would shrink the layer to the click
+        // origin and grow it back. Skip until the overlay has its real box, then
+        // shrink immediately — the grow-only settle exists for splitter drags, not
+        // for this.
+        _syncLayerToOwner(board) {
+            if (!board?.owner) return;
+            const wrapper = board.owner.closest(".browserContainer");
+            if (wrapper?.hasAttribute("animate")) return;
+            this._positionLayer(board, !!wrapper?.hasAttribute("has-finished-animation"));
         }
 
         // Keeps every showing board's layer over its tab, for as long as any tile is up.
@@ -356,7 +368,7 @@
                 for (const board of this._boards.values()) {
                     if (!this._boardPainting(board)) continue;
                     painting = true;
-                    this._positionLayer(board);
+                    this._syncLayerToOwner(board);
                 }
                 if (!painting) return;
                 this._positionRaf = window.requestAnimationFrame(tick);
