@@ -300,7 +300,12 @@
             // The cached rect belongs to the element that just went away; keeping it would
             // let a coincidental match skip the reposition onto the new one.
             board.lastRect = null;
+            // Cached with the owner rather than walked per call: _positionLayer reads this
+            // once a frame per painting board, and closest() is a tree walk.
+            board.wrapper = null;
+            board.glanceSettled = false;
             if (!ownerBrowser) return;
+            try { board.wrapper = ownerBrowser.closest(".browserContainer"); } catch (e) { }
 
             // A sidebar collapse or a window resize moves the content area without the page
             // repainting, so the layer cannot rely on the page's frame loop alone. This is
@@ -323,14 +328,24 @@
 
         // Glance's open animation scales the wrapper with a transform. Following
         // getBoundingClientRect through that would shrink the layer to the click
-        // origin and grow it back. Skip until the overlay has its real box, then
-        // shrink immediately — the grow-only settle exists for splitter drags, not
-        // for this.
+        // origin and grow it back. The skip itself now lives in _positionLayer, so
+        // that every caller gets it and not only the three that route through here.
+        //
+        // What is left is the shrink, and it is latched. has-finished-animation stays
+        // on the wrapper for as long as the overlay does, so testing it per call meant
+        // passing shrink:true on every frame of the position loop — which is the
+        // grow-only rule switched off for the life of the board, not a one-off catch-up
+        // after the overlay committed its box. Once is what was meant.
         _syncLayerToOwner(board) {
             if (!board?.owner) return;
-            const wrapper = board.owner.closest(".browserContainer");
-            if (wrapper?.hasAttribute("animate")) return;
-            this._positionLayer(board, !!wrapper?.hasAttribute("has-finished-animation"));
+            let shrink = false;
+            if (board.wrapper?.hasAttribute("has-finished-animation")) {
+                shrink = !board.glanceSettled;
+                board.glanceSettled = true;
+            } else {
+                board.glanceSettled = false;
+            }
+            this._positionLayer(board, shrink);
         }
 
         // Keeps every showing board's layer over its tab, for as long as any tile is up.
@@ -432,6 +447,12 @@
         // and short enough that nobody sees the overhang.
         _positionLayer(board, shrink = false) {
             if (!board || !board.layer || !board.owner) return;
+            // Glance scales the wrapper with a transform while it opens, so the owner's
+            // rect during that is the animation's, not the box the overlay will keep.
+            // Here rather than in _syncLayerToOwner because attach, setBoardPainting and
+            // the owner re-target all reach this directly, and all three can land in the
+            // middle of the animation — which is the case this skip exists for.
+            if (board.wrapper?.hasAttribute("animate")) return;
             const rect = board.owner.getBoundingClientRect();
             const last = board.lastRect;
 

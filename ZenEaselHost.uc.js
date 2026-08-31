@@ -112,16 +112,13 @@
                 this.splitResize = new window.ZenEaselSplitResize();
                 this.splitResize.install();
 
+                // The wrap on fullyOpenGlance is the whole of the interception. There used
+                // to be a capturing "command" listener on mainCommandSet beside it, for
+                // cmd_zenGlanceExpand — it never fired: expand calls the manager's method
+                // directly and dispatches no command. It also could not have kept the wrap's
+                // forSplit exemption, so had it ever started firing it would have collapsed
+                // the overlay out from under a split.
                 this._hookGlanceExpand();
-                this._onGlanceExpandCommand = event => {
-                    if (event.target?.id !== "cmd_zenGlanceExpand") return;
-                    if (!this._residentForExpand()) return;
-                    event.stopImmediatePropagation();
-                    event.preventDefault();
-                    this._collapseSatelliteToOriginal();
-                };
-                document.getElementById("mainCommandSet")
-                    ?.addEventListener("command", this._onGlanceExpandCommand, true);
 
                 // CustomizableUI is not ready at script-load time on a cold start.
                 this._buttonTimer = setTimeout(() => this._createToolbarButton(), 2000);
@@ -226,11 +223,14 @@
             }
         }
 
-        // The overlay tab Glance is showing right now. ?glance=1 is not enough:
-        // a board that was first opened as a glance and then expanded keeps that
-        // query, and treating it as an overlay hid every real resident.
+        // A tab that is a *second view* of a board rather than the board's home: the
+        // overlay Glance is showing right now, or the plain tab we open in its place
+        // when Glance cannot run. ?glance=1 is not enough on its own — a board that was
+        // first opened as a glance and then expanded keeps that query, and treating it
+        // as an overlay hid every real resident — so both cases are marked on the tab.
         _tabIsGlanceView(tab) {
-            return !!tab?.hasAttribute("zen-glance-tab");
+            return !!(tab?.hasAttribute("zen-glance-tab") ||
+                tab?.hasAttribute("zen-easel-satellite"));
         }
 
         // The tab showing this easel anywhere in the session, and the window holding it.
@@ -272,15 +272,22 @@
                     if (tab.closing || this._tabIsGlanceView(tab)) continue;
                     if (!this._matchEaselTab(tab, easelId)) continue;
                     const pinned = !!(tab.pinned || tab.hasAttribute("zen-essential"));
-                    return { win, tab, pinned };
+                    // The id travels with the record: _captureResident outlives the call
+                    // that made it, and whoever drops it has to know which board it was for.
+                    return { win, tab, pinned, easelId };
                 }
             }
             return null;
         }
 
         // The recorded original for this board, not a leftover from the last capture.
+        // closing/isConnected/closed as well as the id, because this is the guard on a
+        // record that is *kept* — _captureResident outlives the capture that made it, and
+        // a tab that has already been removed still answers _matchEaselTab from the
+        // browser hanging off it. Focusing one of those does nothing at all.
         _isResidentFor(hit, easelId) {
-            if (!hit?.tab || !easelId || hit.tab.closing) return false;
+            if (!hit?.tab || !easelId || hit.tab.closing || !hit.tab.isConnected) return false;
+            try { if (hit.win?.closed) return false; } catch (e) { return false; }
             if (this._tabIsGlanceView(hit.tab)) return false;
             return this._matchEaselTab(hit.tab, easelId);
         }
@@ -444,7 +451,7 @@
         //
         // Expand also breaks one-tab-per-easel, so it is resolved the same way claimEasel
         // resolves every other duplicate: the newcomer goes and the original is focused.
-        _armSatellite(glanceTab, residentHit, easelId = null) {
+        _armSatellite(glanceTab, residentHit, easelId) {
             if (!glanceTab || !this._isResidentFor(residentHit, easelId)) return;
             if (residentHit.tab === glanceTab) return;
             // Called twice for one overlay: claimEasel arms it as the satellite's page
@@ -552,14 +559,28 @@
             }
         }
 
-        async _completeSatellite(residentHit, glanceTab, easelId = null) {
+        // easelId is required rather than defaulted: _armSatellite refuses to arm without
+        // one (_isResidentFor returns false for a falsy id), so every armed satellite has
+        // it, and the residentHit-only fallback these used to carry was unreachable.
+        async _completeSatellite(residentHit, glanceTab, easelId) {
             this._disarmSatellite();
-            await this._flushSatellite(glanceTab);
             // Every copy, not only the one that was recorded when the satellite opened:
             // the freeze went out to all of them, and a copy left frozen is a board that
             // silently stops saving.
-            if (easelId) await this._reloadViews(easelId, glanceTab);
-            else await this._reloadResident(residentHit);
+            await this._flushSatellite(glanceTab);
+            await this._reloadViews(easelId, glanceTab);
+            this._forgetCaptureResident(easelId);
+        }
+
+        // The handover this record existed for is over. Held any longer it is a strong
+        // reference to a tab — and through ownerGlobal to a whole window — kept alive by
+        // this host until somebody happens to take another capture. The same reason
+        // _pageFor refuses to cache. Guarded on the id so a capture that started while
+        // this one was finishing keeps the record it just made.
+        _forgetCaptureResident(easelId) {
+            if (!easelId || this._captureResident?.easelId === easelId) {
+                this._captureResident = null;
+            }
         }
 
         /* -------------------------------------------------------- glance expand */
@@ -635,11 +656,10 @@
             // Drop the observers first: GlanceClose would otherwise reload the
             // original a second time, after it is already on screen.
             this._disarmSatellite();
-            if (easelId) this._freezeViews(easelId, glanceTab);
+            this._freezeViews(easelId, glanceTab);
 
             await this._flushSatellite(glanceTab);
-            if (easelId) await this._reloadViews(easelId, glanceTab);
-            else await this._reloadResident(residentHit);
+            await this._reloadViews(easelId, glanceTab);
 
             // The same close the overlay button uses. noAnimation is not a shortcut
             // for this: it leaves the overlay tab, deck-selected, and glance-id in
@@ -647,6 +667,7 @@
             // the stuck fullscreen state expand was landing in.
             await this._dismissGlanceOverlay(glanceTab);
             await this._focusEaselTab(residentHit);
+            this._forgetCaptureResident(easelId);
         }
 
         async _dismissGlanceOverlay(glanceTab) {
@@ -684,13 +705,13 @@
 
         // Fallback if Glance strips zen-glance-tab without going through our wrap
         // (split, or a build that calls the prototype method directly).
-        async _expandSatellite(residentHit, glanceTab, easelId = null) {
+        async _expandSatellite(residentHit, glanceTab, easelId) {
             this._disarmSatellite();
             await this._flushSatellite(glanceTab);
-            if (easelId) await this._reloadViews(easelId, glanceTab);
-            else await this._reloadResident(residentHit);
+            await this._reloadViews(easelId, glanceTab);
             await this._dismissGlanceOverlay(glanceTab);
             await this._focusEaselTab(residentHit);
+            this._forgetCaptureResident(easelId);
         }
 
         _markEaselStale(tab) {
@@ -987,8 +1008,29 @@
             return tab;
         }
 
+        // A satellite already standing for this board here, if there is one. Unlike an
+        // overlay this tab has no dismissal of its own, so without reuse every capture
+        // taken while Glance is busy leaves another one behind and they pile up. Same
+        // workspace only: a satellite in another space is no more reachable than the
+        // resident it was opened to avoid switching to.
+        _findLocalSatellite(easelId) {
+            try {
+                for (const tab of this._tabsInWindow()) {
+                    if (tab.closing || !tab.hasAttribute("zen-easel-satellite")) continue;
+                    if (!this._tabIsInActiveWorkspace(tab)) continue;
+                    if (this._matchEaselTab(tab, easelId)) return tab;
+                }
+            } catch (e) { }
+            return null;
+        }
+
         _openLocalSatellite(easelId) {
             if (!easelId) return null;
+            const existing = this._findLocalSatellite(easelId);
+            if (existing) {
+                gBrowser.selectedTab = existing;
+                return existing;
+            }
             this._pendingGlanceEaselId = easelId;
             try {
                 const tab = gBrowser.addTab(easelPageUrl(easelId, { glance: true }), {
@@ -996,6 +1038,18 @@
                     inBackground: false,
                     skipAnimation: true
                 });
+                // Our own mark, because neither of the two things that already classify a
+                // tab can say what this one is. It is not zen-glance-tab — Glance never
+                // touched it — so _findResidentEasel would offer it as the board's home;
+                // but its URL carries glance=1, so _isGlanceSatellite calls it a satellite
+                // for good. A tab that is both is how one capture with Glance unavailable
+                // turned into a satellite of a satellite on the next one.
+                //
+                // Second view, permanently, and outliving the handover on purpose: unlike
+                // an overlay this tab has no dismissal of its own, so it stays until the
+                // user closes it — at which point TabClose completes the handover as it
+                // does for a glance.
+                tab.setAttribute("zen-easel-satellite", "true");
                 gBrowser.selectedTab = tab;
                 try { gBrowser.setIcon(tab, BASE + "resources/zen-easel-board.svg"); } catch (e) { }
                 return tab;
@@ -1492,12 +1546,8 @@
             // satellite, so there is nothing to finish.
             const elsewhere = this._satellite && this._satellite.residentHit.win !== window;
             this._disarmSatellite({ finish: !!elsewhere });
+            this._captureResident = null;
             this._unhookGlanceExpand();
-            if (this._onGlanceExpandCommand) {
-                document.getElementById("mainCommandSet")
-                    ?.removeEventListener("command", this._onGlanceExpandCommand, true);
-                this._onGlanceExpandCommand = null;
-            }
             window.removeEventListener("unload", this._onUnload);
             if (this._onTabSelect) window.removeEventListener("TabSelect", this._onTabSelect);
             if (this.screenshotHook) {

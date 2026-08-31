@@ -344,6 +344,9 @@
         // moment in CSS, used both as a backup if we attached too late and as the
         // "already settled" test when boot finishes after openGlance has resolved.
         _armGlanceSync() {
+            // Idempotent, because pagehide/pageshow can now call this in a cycle and a
+            // second arm over a live one would strand the first listener and observer.
+            this._disarmGlanceSync();
             this._onGlanceOpen = () => this._syncGlanceViewport();
             const browser = window.browsingContext?.embedderElement;
             const chrome = this.chromeWindow;
@@ -665,6 +668,15 @@
         // that queue's shutdown blocker owns the guarantee from there.
         _onPageHide() {
             try { this.element?.store?.handOffForUnload(); } catch (e) { console.error(e); }
+            // The one thing that does have to be a teardown. _armGlanceSync is the only
+            // part of this page that hangs listeners on the *chrome* document — a
+            // GlanceOpen listener on our tab and a MutationObserver on its container —
+            // and both outlive the document that made them. teardown() would drop them,
+            // but nothing calls it: destroy() has no callers, so pagehide is the last
+            // word this page gets. Left armed, every navigation off about:easel adds
+            // another pair and each one pins the page element it closed over, canvas
+            // backing stores and all. _onPageShow re-arms for the bfcache case.
+            try { this.element?._disarmGlanceSync(); } catch (e) { console.error(e); }
             // detach, not a teardown. The tiles belong to the browser window and outlive this
             // document by design; what goes away here is the view onto them. If the tab is
             // genuinely closing rather than reloading, the host's own orphan check notices
@@ -690,6 +702,11 @@
         _onPageShow(event) {
             if (!event.persisted) return;
             try { this.element?.live?.foreground(); } catch (e) { console.error(e); }
+            // The other half of the disarm in _onPageHide. A page that came back out of
+            // the session history is on screen again and can still be glanced, so it needs
+            // its listeners back — and _armGlanceSync ends by syncing if the overlay is
+            // already settled, which is the state a page restored *into* a glance is in.
+            try { this.element?._armGlanceSync(); } catch (e) { console.error(e); }
         }
 
         // Backgrounding stops the tiles *painting*. It used to stop them existing, which is

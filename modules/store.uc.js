@@ -318,8 +318,25 @@
             // Frozen for the duration of the read for the reason reloadFromDisk thaws
             // last: a mutation arriving mid-read must not schedule a save of the copy
             // that is about to be discarded.
+            //
+            // Put back on the way out, which is the opposite of what the arranged handover
+            // wants and correct for the same reason. reloadFromDisk leaves a failed read
+            // frozen deliberately: there a satellite has taken over as the board's writer,
+            // so refusing to write is the safe end of the trade. Nothing has taken over
+            // here — this runs unprompted on a tab switch — so a missing file or a bad
+            // parse would strand a board the user is looking at with saving silently off
+            // and nothing on screen to say so.
+            const wasFrozen = this._frozen;
             this._frozen = true;
-            return this.reloadFromDisk();
+            let doc = null;
+            try {
+                doc = await this.reloadFromDisk();
+            } catch (e) {
+                this._frozen = wasFrozen;
+                throw e;
+            }
+            if (!doc) this._frozen = wasFrozen;
+            return doc;
         }
 
         // Runs on every mutation, which includes every frame of a pan or zoom. The
