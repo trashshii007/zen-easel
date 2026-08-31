@@ -674,6 +674,12 @@
         return {
             type: capture.type === "fullWindow" ? "fullWindow" : "partialPage",
             webContentSize: size,
+            // Optional, and null for every capture taken before it existed. The layout box
+            // above excludes the scrollbar gutter; this one includes it, and it is the box
+            // media queries and vw units are resolved against. A card without it lays out
+            // exactly as it always did — which is what keeps older boards working — so this
+            // is read as "unknown", never as "there was no gutter".
+            viewport: readSize(capture.viewport),
             webContentOffset: offset,
             frameRelativeToViewport: frame
         };
@@ -689,6 +695,21 @@
             return v && finite(v.x) && finite(v.y) && finite(v.w) && finite(v.h) && v.w > 0 && v.h > 0
                 ? { x: v.x, y: v.y, w: v.w, h: v.h } : null;
         }
+    }
+
+    // A scroll position, or null. Same shape as a capture's webContentOffset but without a
+    // capture around it — a web tile has no crop, only a place it was last left.
+    //
+    // x is allowed to be negative and y is not. That is not an inconsistency: window.scrollX
+    // is negative on an RTL document, which is an ordinary page and not a corrupt record,
+    // while a negative scrollY has no meaning anywhere. Rejecting both threw away the whole
+    // offset for every right-to-left site, and disagreed with readPoint, which the capture's
+    // own offset goes through and which allows either sign.
+    function readOffset(v) {
+        const finite = n => typeof n === "number" && Number.isFinite(n);
+        if (!v || typeof v !== "object" || !finite(v.x) || !finite(v.y)) return null;
+        if (v.y < 0) return null;
+        return { x: Math.round(v.x), y: Math.round(v.y) };
     }
 
     // Ceilings on what a single object may contain.
@@ -798,6 +819,13 @@
             obj.webcard.favicon = safeFaviconUrl(obj.webcard.favicon);
             obj.webcard.capture = sanitizeCapture(obj.webcard.capture);
             obj.webcard.useLiveWebCard = obj.webcard.useLiveWebCard === true;
+            // The container the capture was taken in. Cookies are keyed on this, so a card
+            // that forgets it shows the site signed out — or signed in as somebody else.
+            // Absent on every card taken before this shipped, which reads as the default
+            // container and is the behaviour those cards already had.
+            obj.webcard.userContextId =
+                Number.isInteger(obj.webcard.userContextId) && obj.webcard.userContextId > 0
+                    ? obj.webcard.userContextId : 0;
             // Unlike useLiveWebCard this one *is* honoured on load, because the only thing
             // it can do is make a board quieter.
             obj.webcard.muted = obj.webcard.muted === true;
@@ -820,6 +848,17 @@
             // interpolated into a file path under the easel's own assets directory, and a
             // board file is hand-editable.
             if (!isSafeAssetName(obj.webBrowser.poster)) obj.webBrowser.poster = "";
+            // Set when the user took the poster deliberately, with the refresh button. An
+            // automatic capture will not overwrite one of these — which is the whole point,
+            // since an automatic capture cannot tell a logged-in page from a login wall. It
+            // is spent when the tile is browsed off the page it was taken of, so it survives
+            // a reload of the board but not a change of subject.
+            obj.webBrowser.posterPinned = obj.webBrowser.posterPinned === true;
+            // Where in the page the refresh button was pressed, so a web tile reopens where
+            // it was left rather than at the top. Unlike a webcard there is no crop to
+            // reproduce, so this is a preference rather than a contract: an unreproducible
+            // one costs a scroll position, not a wrong picture.
+            obj.webBrowser.scrollOffset = readOffset(obj.webBrowser.scrollOffset);
         }
 
         return obj;

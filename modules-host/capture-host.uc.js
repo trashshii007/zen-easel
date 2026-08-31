@@ -93,8 +93,30 @@
                 url: browser.currentURI ? browser.currentURI.spec : "",
                 title: this._tabTitle(),
                 favicon: window.gZenEaselHost ? window.gZenEaselHost.localFavicon() : "",
+                // Which container the page was open in. A card shows the site as you were
+                // seeing it, and *which* of your sessions you were seeing it with is part of
+                // that: a shot taken in a container tab reproduced in the default one is a
+                // different account, or no account at all, which is how a live card of a
+                // signed-in page came back signed out.
+                userContextId: ZenEaselCaptureHost._userContextIdOf(browser),
                 capture: await this._contentCaptureLayout(browser, region, payload)
             };
+        }
+
+        // The container a browser is in, as a plain number. Read from the browsing context
+        // rather than the attribute: the attribute is absent for the default container and
+        // present as a string otherwise, and the origin attributes are what the cookie jar
+        // is actually keyed on.
+        //
+        // Static because the other capture path — screenshot-hook's preview dialog — has to
+        // record the same thing and has no reason to stand a picker up to ask.
+        static _userContextIdOf(browser) {
+            try {
+                const id = browser?.browsingContext?.originAttributes?.userContextId;
+                return Number.isInteger(id) && id > 0 ? id : 0;
+            } catch (e) {
+                return 0;
+            }
         }
 
         // drawSnapshot with an explicit document-space rect, tiled.
@@ -169,8 +191,11 @@
         // a content-space region, and neither would be visible at 100% zoom.
         async _contentCaptureLayout(browser, region, payload, type = "partialPage") {
             try {
-                const viewport = await this.measureViewport(browser);
-                if (!viewport) return null;
+                // `measured` rather than `viewport`: the result carries a viewport *field*
+                // of its own now — the scrollbar-inclusive box — and viewport.viewport
+                // reads like a typo.
+                const measured = await this.measureViewport(browser);
+                if (!measured) return null;
 
                 // Zen normalises page coordinates by subtracting scrollMinX/scrollMinY
                 // (getCoordinatesFromEvent), while webContentOffset is the raw win.scrollX/Y
@@ -181,8 +206,8 @@
                 const pageY = Math.round(region.top + (payload.scrollMinY || 0));
 
                 const frame = {
-                    x: Math.round(pageX - viewport.webContentOffset.x),
-                    y: Math.round(pageY - viewport.webContentOffset.y),
+                    x: Math.round(pageX - measured.webContentOffset.x),
+                    y: Math.round(pageY - measured.webContentOffset.y),
                     w: Math.round(region.width),
                     h: Math.round(region.height)
                 };
@@ -193,7 +218,7 @@
                 // not fail — it confidently shows the wrong part of the site. Declining the
                 // geometry means the card simply never offers to go live, which is the same
                 // honest answer measureViewport gives for an inner-scrolling page.
-                const size = viewport.webContentSize;
+                const size = measured.webContentSize;
                 if (frame.x < 0 || frame.y < 0 ||
                     frame.x + frame.w > size.w || frame.y + frame.h > size.h) {
                     console.warn("[zen-easel] this selection reaches outside the viewport, " +
@@ -204,8 +229,12 @@
 
                 return {
                     type,
-                    webContentSize: viewport.webContentSize,
-                    webContentOffset: viewport.webContentOffset,
+                    webContentSize: measured.webContentSize,
+                    // The scrollbar-inclusive box, carried through so a live tile lays the
+                    // page out against the viewport it was captured in rather than one a
+                    // gutter narrower. Null on a measurement taken before it existed.
+                    viewport: measured.viewport || null,
+                    webContentOffset: measured.webContentOffset,
                     frameRelativeToViewport: frame
                 };
             } catch (e) {

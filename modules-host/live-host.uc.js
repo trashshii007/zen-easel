@@ -189,6 +189,11 @@
             this._generation = 0;
             this._destroyed = false;
 
+            // The extension-identity patch, built on the first mount and only when its pref
+            // is on. Declared here rather than left to appear on first use, so every field
+            // this class has is visible in one place. See _tabIdentity.
+            this._identity = null;
+
             this._orphanTimer = null;
             this._idleTimer = null;
             this._widgetTimer = null;
@@ -708,15 +713,20 @@
             label.className = "zen-easel-card-chrome-title";
             label.setAttribute("crop", "end");
 
+            const refresh = this._chromeButton(doc, "refresh");
             const play = this._chromeButton(doc, "play");
             const link = this._chromeButton(doc, "link");
 
-            bar.append(favicon, label, play, link);
+            // Packed left to right, which is the reverse of the order webcardChromeRects
+            // claims them in — it walks leftwards from the bar's right edge. The two have to
+            // agree item for item or the buttons are drawn somewhere other than where the
+            // clicks are looked for.
+            bar.append(favicon, label, refresh, play, link);
             wrapper.appendChild(bar);
             board.layer.appendChild(wrapper);
 
             this._chrome = {
-                board, wrapper, bar, favicon, label, play, link,
+                board, wrapper, bar, favicon, label, play, link, refresh,
                 // The content last written, so a frame that only moved the board does not
                 // rewrite a label; and whether the fade has been started.
                 applied: null, shown: false
@@ -799,6 +809,7 @@
                 applied.state === spec.state &&
                 applied.muted === spec.muted &&
                 applied.canToggle === spec.canToggle &&
+                applied.canRefresh === spec.canRefresh &&
                 applied.url === spec.url &&
                 applied.showFavicon === spec.showFavicon &&
                 applied.showLabel === spec.showLabel &&
@@ -829,13 +840,18 @@
                 chrome.play.setAttribute("data-state", spec.state || "play");
                 chrome.play.toggleAttribute("data-muted", !!spec.muted);
                 chrome.link.toggleAttribute("hidden", !spec.url);
+                // Only a running tile can be re-baselined, so this is the one control that
+                // comes and goes with the card's own state rather than with its geometry.
+                chrome.refresh.toggleAttribute("hidden", !spec.canRefresh);
 
                 chrome.play.toggleAttribute("data-hover", spec.hoverPart === "play");
                 chrome.link.toggleAttribute("data-hover", spec.hoverPart === "link");
+                chrome.refresh.toggleAttribute("data-hover", spec.hoverPart === "refresh");
 
                 chrome.applied = {
                     objectId: spec.objectId, title: spec.title, favicon: spec.favicon,
                     state: spec.state, muted: spec.muted, canToggle: spec.canToggle,
+                    canRefresh: spec.canRefresh,
                     url: spec.url, hoverPart: spec.hoverPart,
                     showFavicon: spec.showFavicon, showLabel: spec.showLabel
                 };
@@ -1092,6 +1108,13 @@
             const spec = safeExternalUrl(url);
             if (!spec) return false;
 
+            // Normalised once, here, because three things downstream read it and they must
+            // agree: predictRemoteTypeForURI, the usercontextid attribute, and the origin
+            // attributes _principalFor stamps on the triggering principal. A container id
+            // that only two of them believed in would put the load in a different jar than
+            // the principal describes.
+            options.userContextId = this._safeUserContextId(options.userContextId);
+
             const owner = this._easelBrowserFor(easelId);
             if (!owner) return false;
 
@@ -1209,6 +1232,10 @@
                 // muted starts false to match the element, which has not been touched.
                 audible: false, muted: false, userMuted: !!options.muted
             };
+            // Before the load, so the tile's very first request already carries the
+            // identity: uBO builds its page store off the main-frame request, and one that
+            // arrived as behind-the-scenes would leave the store keyed on nothing.
+            this._tabIdentity()?.adopt(browser);
             this._watchAudio(tile);
             // Stored before the load starts, because the child's DOMContentLoaded — and
             // the Ready message it sends from there — can arrive before this call
@@ -1232,8 +1259,12 @@
 
             try {
                 const load = {
-                    // Deliberately not the system principal.
-                    triggeringPrincipal: Services.scriptSecurityManager.createNullPrincipal({})
+                    // The site's own principal rather than the null principal this used to
+                    // build. Gecko reads a top-level load from a null principal as
+                    // cross-site, which strips SameSite=Strict cookies and sends
+                    // Sec-Fetch-Site: cross-site — so a card of a signed-in page arrived
+                    // signed out. See _principalFor for what that buys and what it costs.
+                    triggeringPrincipal: this._principalFor(spec, options)
                 };
                 // Left off entirely unless the URL is one that needs it, so the property is
                 // absent rather than null for every other tile.
@@ -1257,20 +1288,41 @@
         // non-zero status on STATE_STOP. A site that refuses to be embedded —
         // X-Frame-Options, or a frame-ancestors CSP — is not an error at all: the channel
         // succeeds and the docshell quietly lands on about:neterror.
+        // The listener is kept attached for the life of the tile rather than detached on the
+        // first settle. That is the interstitial case: an anti-DDoS check is a page that
+        // loads successfully and then navigates, so settling on it and going home meant the
+        // *challenge* was what the tile reported as its landed URL.
+        //
+        // What stays one-shot is the *failing*. Every teardown below is gated on `settled`,
+        // and the timers stop being armed once it is set: they exist to catch a card that
+        // never arrives anywhere, and a card that has arrived must not be destroyed by a
+        // slow, aborted or erroring navigation the user made inside it. Losing that gate is
+        // how clicking a PDF link in a tile deleted the card.
         _watchLoad(tile, url) {
             const browser = tile.browser;
             let settled = false;
 
-            const finish = reason => {
-                if (settled) return;
-                settled = true;
+            const clearTimers = () => {
                 window.clearTimeout(tile.loadTimer);
                 window.clearTimeout(tile.navCheckTimer);
+                tile.loadTimer = 0;
+                tile.navCheckTimer = 0;
+            };
+
+            // A card that has already landed somewhere is never torn down. Whatever went
+            // wrong with a later navigation is on screen for the user to see and act on, and
+            // unmounting under them would replace a visible error page with a hole in the
+            // board. The guard is here rather than at the call sites so that no caller —
+            // including the two timers, which cannot see the settle that raced them — can
+            // reach the teardown by forgetting it.
+            const fail = reason => {
+                if (settled) return;
+                clearTimers();
                 if (tile.detachListener) {
                     tile.detachListener();
                     tile.detachListener = null;
                 }
-                if (!reason || !this._tiles.has(tile.objectId)) return;
+                if (!this._tiles.has(tile.objectId)) return;
 
                 this.log("live tile failed:", url, reason);
                 const id = tile.objectId;
@@ -1278,26 +1330,13 @@
                 this._notifyPage(tile.easelId, id, reason);
             };
 
-            const listener = {
-                QueryInterface: ChromeUtils.generateQI([
-                    "nsIWebProgressListener", "nsISupportsWeakReference"
-                ]),
-                onStateChange: (progress, request, flags, status) => {
-                    const done = Ci.nsIWebProgressListener.STATE_STOP;
-                    const network = Ci.nsIWebProgressListener.STATE_IS_NETWORK;
-                    if (!(flags & done) || !(flags & network)) return;
-
-                    // NS_OK is 0, compared numerically so this does not depend on Cr being
-                    // a global in whichever document the host was loaded into.
-                    if (status !== 0) {
-                        finish("That site could not be loaded in the easel");
-                        return;
-                    }
-                    const landed = browser.documentURI ? browser.documentURI.spec : "";
-                    if (/^about:(neterror|blocked|certerror)/.test(landed)) {
-                        finish("That site refuses to be embedded, so the card stays a screenshot");
-                        return;
-                    }
+            // A hop landed cleanly. The one-time side effects run once; the watch itself
+            // stays up, because the page this settled on may not be the page that stays.
+            const succeed = landed => {
+                clearTimers();
+                const first = !settled;
+                if (first) {
+                    settled = true;
                     // Re-asserted after the load: a process switch on navigation brings a
                     // new remote tab with it, and the flag does not travel. Neither does
                     // the mute state, for the same reason — so the element is put back into
@@ -1305,15 +1344,114 @@
                     this._markActive(browser);
                     tile.muted = false;
                     this._applyAudio(tile);
-                    finish(null);
+                }
+
+                // Pushed, not waited for. The child is supposed to ask for its config on
+                // every DOMContentLoaded and pageshow — and measurably does not: a freshly
+                // mounted tile was found holding its field initializers, no offset, no
+                // locks, while the parent held the correct offset the whole time. That is
+                // the whole of "the card reopens at the top of the page".
+                //
+                // The pull is left in place; this is the belt to its braces, and it fires
+                // on every settle, so a navigation that brings a new actor in a new process
+                // gets configured whether or not it manages to ask.
+                this._pushConfig(tile);
+                this._notifyLanded(tile.easelId, tile.objectId, landed, first);
+            };
+
+            // Re-armed per navigation rather than per load, so a multi-hop challenge gets
+            // the whole budget on each hop instead of sharing one between them — but only
+            // until the tile has landed somewhere. Their job is to catch a card that never
+            // arrives at all; once one has, a slow or abandoned navigation inside it is the
+            // user's business and not grounds for taking the card away.
+            const armTimers = () => {
+                clearTimers();
+                if (settled) return;
+                // A refusal to be embedded does not arrive as an error and does not produce
+                // an error page: the load is simply cancelled, and the tile sits on
+                // about:blank forever. currentURI changes as soon as a navigation *starts*,
+                // so still being about:blank a few seconds in means it never started.
+                tile.navCheckTimer = window.setTimeout(() => {
+                    const at = browser.currentURI ? browser.currentURI.spec : "";
+                    if (at === "about:blank" || !at) {
+                        fail("That site refuses to be embedded, so the card stays a screenshot");
+                    }
+                }, NAVIGATION_CHECK_MS);
+
+                tile.loadTimer = window.setTimeout(
+                    () => fail("That site took too long to load in the easel"), LOAD_TIMEOUT_MS
+                );
+            };
+
+            const listener = {
+                QueryInterface: ChromeUtils.generateQI([
+                    "nsIWebProgressListener", "nsISupportsWeakReference"
+                ]),
+                onStateChange: (progress, request, flags, status) => {
+                    // Subframes are not this tile. The old watch was one-shot — `settled`
+                    // guarded finish() — which bounded the damage a subframe event could do;
+                    // keeping the listener attached for the life of the tile takes that
+                    // bound away, so the filter has to be explicit. Without it an ad frame
+                    // uBO cancels arrives as a non-zero status and unmounts the whole card,
+                    // a subframe that starts and never stops re-arms the load timer onto a
+                    // healthy tile, and every subframe stop re-pushes the config and
+                    // reschedules the poster. Firefox's own TabProgressListener guards on
+                    // this in six places for the same reasons.
+                    if (!progress.isTopLevel) return;
+
+                    const start = Ci.nsIWebProgressListener.STATE_START;
+                    const done = Ci.nsIWebProgressListener.STATE_STOP;
+                    const network = Ci.nsIWebProgressListener.STATE_IS_NETWORK;
+                    if (!(flags & network)) return;
+
+                    // A new top-level navigation — the second hop of a challenge, or a
+                    // redirect out of a login wall. The clock starts again for it.
+                    if (flags & start) {
+                        armTimers();
+                        // A web tile's remembered scroll position is spent once the page it
+                        // belonged to has been and gone. Dropped here rather than on the
+                        // first settle, which is a race it kept losing: pageshow fires after
+                        // load, STATE_STOP fires around it, and whenever the stop won, the
+                        // Ready that pageshow sends was answered with offset:null — which
+                        // clears the child's offset and kills the settle watch outright, so
+                        // the tile stayed wherever the first clamped scrollTo had put it.
+                        // That is "it reopens at the old location".
+                        //
+                        // Gated on settled, so this is a *later* navigation — the user
+                        // following a link inside the tile — and not the initial load.
+                        if (settled && !tile.pinned && tile.config && tile.config.offset) {
+                            tile.config = { ...tile.config, offset: null };
+                        }
+                        return;
+                    }
+                    if (!(flags & done)) return;
+
+                    // NS_OK is 0, compared numerically so this does not depend on Cr being
+                    // a global in whichever document the host was loaded into.
+                    if (status !== 0) {
+                        // NS_BINDING_ABORTED, which is not a failure at all: it is what a
+                        // load that turned into a download, was handed off to an external
+                        // protocol, or was stopped by the user reports. Firefox's own
+                        // TabProgressListener ignores this same value for this same reason,
+                        // and treating it as one took a working card away for clicking a
+                        // link to a PDF. fail() ignores everything after the first settle.
+                        if (status === 0x804B0002) return;
+                        fail("That site could not be loaded in the easel");
+                        return;
+                    }
+                    const landed = browser.documentURI ? browser.documentURI.spec : "";
+                    if (/^about:(neterror|blocked|certerror)/.test(landed)) {
+                        fail("That site refuses to be embedded, so the card stays a screenshot");
+                        return;
+                    }
+                    succeed(landed);
                 }
             };
 
             try {
                 browser.addProgressListener(listener, Ci.nsIWebProgress.NOTIFY_STATE_ALL);
-                // Handed to the tile so unmount can detach it too. A tile torn down
-                // before its load settles never reaches finish(), and the listener would
-                // otherwise stay registered against a browser that is going away.
+                // Handed to the tile so unmount can detach it too. The watch now outlives
+                // the first settle, so this is the only thing that ever takes it down.
                 tile.detachListener = () => {
                     try { browser.removeProgressListener(listener); } catch (e) { }
                 };
@@ -1321,20 +1459,27 @@
                 this.log("could not watch the tile's load:", e.message);
                 return;
             }
-            // A refusal to be embedded does not arrive as an error and does not produce an
-            // error page: the load is simply cancelled, and the tile sits on about:blank
-            // forever. currentURI changes as soon as a navigation *starts*, so still being
-            // about:blank a few seconds in means it never started.
-            tile.navCheckTimer = window.setTimeout(() => {
-                const at = browser.currentURI ? browser.currentURI.spec : "";
-                if (at === "about:blank" || !at) {
-                    finish("That site refuses to be embedded, so the card stays a screenshot");
-                }
-            }, NAVIGATION_CHECK_MS);
 
-            tile.loadTimer = window.setTimeout(
-                () => finish("That site took too long to load in the easel"), LOAD_TIMEOUT_MS
-            );
+            armTimers();
+        }
+
+        // A tile settled on a page. The page-side layer decides what to do about it — most
+        // of all whether this is a page worth photographing as the card's picture, which an
+        // interstitial or a login wall is not.
+        //
+        // `first` distinguishes the tile arriving at the page it was mounted for from the
+        // user navigating it somewhere else afterwards. Only the page side cares, and it
+        // cares a lot: a poster the user pinned deliberately survives the mount that
+        // reopens the card and does not survive being browsed away from.
+        _notifyLanded(easelId, objectId, landedUrl, first) {
+            if (!easelId) return;
+            try {
+                const browser = this._easelBrowserFor(easelId);
+                const page = browser?.contentWindow?.gZenEaselPage;
+                page?.onLiveTileLanded(objectId, landedUrl, first);
+            } catch (e) {
+                this.log("could not tell the page a tile landed:", e.message);
+            }
         }
 
         // Where the scroll is pinned, which locks apply, and the per-site CSS repairs.
@@ -1352,10 +1497,81 @@
                 offset: options.scrollOffset || null,
                 lockScroll: pinned,
                 lockSelection: pinned,
+                // The scrollbar gutter the page had at capture, which the tile has to
+                // reproduce rather than remove — see ZenEaselLiveChild.#hideScrollbars.
+                gutter: options.gutter > 0 ? options.gutter : 0,
                 // A sticky header is a feature in a web tile and a defect in a crop
                 // taken further down the page, so the repairs are a crop concern.
                 cssPatches: pinned ? CSS_PATCHES : []
             };
+            // What the tile was born as, so unlocking and re-locking can put it back
+            // without the caller having to remember. options is gone by then.
+            tile.pinned = pinned;
+        }
+
+        // The push half of the config seam. Everything else is pull — the child asks on
+        // Ready and configFor() answers — which is right for a tile that has just navigated
+        // and wrong for one whose configuration has changed underneath it. Unlocking a card
+        // to be repositioned, and re-pinning it once it has been, are both this.
+        //
+        // tile.config is updated by the caller *before* this runs, never after: the child
+        // re-asks on the next DOMContentLoaded, and a stale record there would quietly undo
+        // whatever this pushed.
+        _pushConfig(tile) {
+            if (!tile || !tile.browser || !tile.config) return;
+            try {
+                const windowGlobal = tile.browser.browsingContext?.currentWindowGlobal;
+                if (!windowGlobal) return;
+                windowGlobal.getActor("ZenEaselLive")
+                    .sendAsyncMessage("ZenEaselLive:Configure", tile.config);
+            } catch (e) {
+                // getActor throws across a process swap, which is exactly when a tile being
+                // repositioned may be mid-navigation. The child re-asks on the other side,
+                // and it will get the record this caller has already updated.
+                this.log("could not push a tile's config:", e.message);
+            }
+        }
+
+        // Unlocks a pinned tile so the page inside it can be scrolled, selected and
+        // submitted — the repositioning gesture, and the only way to log in to a site
+        // inside a card. Re-locking restores the tile's original configuration, pinned to
+        // whatever offset it has been given by then.
+        //
+        // Clearing `offset` is not optional: the child re-pins on every scroll event, and
+        // that arm is not gated on the scroll lock. Leaving an offset behind would snap the
+        // page back the instant the user moved it.
+        setTileUnlocked(easelId, objectId, unlocked, offset) {
+            const tile = this._tileFor(easelId, objectId);
+            if (!tile || !tile.pinned) return;
+
+            if (unlocked) {
+                if (tile.unlocked) return;
+                tile.unlocked = true;
+                // Kept because clearing `offset` is about to destroy it, and a re-lock whose
+                // own measurement failed needs somewhere to fall back to. A stale pin still
+                // protects the crop; no pin at all does not.
+                tile.pinnedOffset = tile.config.offset || tile.pinnedOffset || null;
+                tile.config = {
+                    ...tile.config,
+                    offset: null,
+                    lockScroll: false,
+                    lockSelection: false
+                };
+            } else {
+                tile.unlocked = false;
+                tile.config = {
+                    ...tile.config,
+                    offset: offset || tile.config.offset || tile.pinnedOffset || null,
+                    lockScroll: true,
+                    lockSelection: true
+                };
+            }
+            // The half of the lock that is not the child's. Everything else here is enforced
+            // in the content process; autoscroll is enforced by the browser element, so it
+            // has to be told separately or an unlocked card would take the wheel and refuse
+            // the middle button.
+            this._applyAutoscroll(tile.browser, !unlocked);
+            this._pushConfig(tile);
         }
 
         // Answered for the parent actor, which has a <browser> and needs the config that
@@ -1367,6 +1583,20 @@
         // moment the tile count stopped being three.
         configFor(browser) {
             return this._byBrowser.get(browser)?.config ?? null;
+        }
+
+        // The easel page that owns a tile's <browser>, found through the tile's own board
+        // rather than by looking for an easel. Same routing _notifyPage uses, and for the
+        // same reason: a window can have two easels open, and a message addressed to "the
+        // easel" reaches the wrong one exactly as often as the right one.
+        pageFor(browser) {
+            const tile = this._byBrowser.get(browser);
+            if (!tile || !tile.easelId) return null;
+            try {
+                return this._easelBrowserFor(tile.easelId)?.contentWindow?.gZenEaselPage ?? null;
+            } catch (e) {
+                return null;
+            }
         }
 
         // The page owns the model, so a tile the host gives up on has to be reported back
@@ -1420,7 +1650,7 @@
             // server-rendered page beside it looks perfect.
             browser.setAttribute("disableglobalhistory", "true");
             browser.setAttribute("disablefullscreen", "true");
-            browser.setAttribute("autoscroll", "false");
+            this._applyAutoscroll(browser, !!options.pinned);
             browser.setAttribute("transparent", "true");
             if (options.userContextId) {
                 browser.setAttribute("usercontextid", String(options.userContextId));
@@ -1452,6 +1682,29 @@
 
             this._markActive(browser);
             return browser;
+        }
+
+        // Middle-click autoscroll, on or off. Gecko gates the whole feature on this one
+        // attribute — browser-custom-element's `autoscrollEnabled` reads it and refuses in
+        // startScroll — so allowing it is a removal rather than an implementation, and
+        // everything that makes it feel native comes with it: the puck, APZ, the keyboard
+        // cancel and the user's own general.autoScroll pref.
+        //
+        // Allowed exactly where scrolling already is. A web tile is a window onto a site and
+        // has always scrolled. A pinned crop must not move, so it keeps the refusal until it
+        // is unlocked for repositioning — the same moment the wheel and the scroll keys stop
+        // being swallowed. Without the second half, a card you had clicked into to reposition
+        // took the wheel but not the middle button, which is a difference nobody would guess.
+        //
+        // Nothing escapes the tile at the end of the page. A scroll that runs out chains to
+        // the parent browsing context, and a tile's is its own top: AutoScrollChild's
+        // Autoscroll:MaybeStartInParent finds no parent and stops, so the board underneath
+        // never hears about it.
+        _applyAutoscroll(browser, locked) {
+            try {
+                if (locked) browser.setAttribute("autoscroll", "false");
+                else browser.removeAttribute("autoscroll");
+            } catch (e) { }
         }
 
         /* ------------------------------------------------------------- poster */
@@ -1499,6 +1752,154 @@
                 return null;
             } finally {
                 if (bitmap) { try { bitmap.close(); } catch (e) { } }
+            }
+        }
+
+        // Where a tile's page actually sits right now, and the viewport boxes it is laid out
+        // in. What "refresh" re-baselines from, and what the width correction checks itself
+        // against. Resolves to null whenever the tile cannot answer.
+        async measureTile(easelId, objectId) {
+            const tile = this._tileFor(easelId, objectId);
+            if (!tile || !tile.browser) return null;
+
+            try {
+                const windowGlobal = tile.browser.browsingContext?.currentWindowGlobal;
+                if (!windowGlobal) return null;
+                return await windowGlobal.getActor("ZenEaselLive")
+                    .sendQuery("ZenEaselLive:Measure");
+            } catch (e) {
+                this.log("a tile refused to be measured:", e.message);
+                return null;
+            }
+        }
+
+        // One rectangle of a tile's document, in document coordinates — the same convention
+        // the capture picker uses, because this is the same kind of picture: the crop a
+        // webcard is, taken again from the live page.
+        //
+        // Deliberately not snapshotTile's whole-document shot capped at POSTER_MAX_EDGE.
+        // That cap is right for a poster, which is a fallback thumbnail written on every
+        // pause; this replaces the capture the card was born from and has to match its
+        // fidelity, so it is taken at the device pixel ratio.
+        //
+        // The tiling loop is the picker's, reused rather than repeated: a crop can be wider
+        // than drawSnapshot will render in one go, and there is exactly one correct way to
+        // stitch it.
+        //
+        // The backdrop is resolved the same way the original capture's was, for the same
+        // reason: this picture replaces that one, and a transparent page composited onto a
+        // hardcoded white would come back with white where the first shot had the theme.
+        // White is the fallback, exactly as it is in captureContentRegion.
+        async snapshotTileRect(easelId, objectId, region) {
+            const tile = this._tileFor(easelId, objectId);
+            if (!tile || !tile.browser) return null;
+
+            // A class, not a singleton — _snapshotPageRect is a prototype method, so it has
+            // to be reached through an instance. The constructor takes nothing and destroy()
+            // is a no-op, so this is as cheap as it looks; screenshot-hook builds one the
+            // same way for the same reason.
+            const Picker = window.ZenEaselCaptureHost;
+            if (!Picker || !region) return null;
+
+            let backdrop = null;
+            try {
+                backdrop = window.gZenEaselCaptureBackdrop
+                    ? window.gZenEaselCaptureBackdrop.resolve(tile.browser) : null;
+            } catch (e) {
+                this.log("could not resolve a backdrop for a refresh:", e.message);
+            }
+
+            const picker = new Picker();
+            try {
+                const windowGlobal = tile.browser.browsingContext?.currentWindowGlobal;
+                if (!windowGlobal) return null;
+
+                let canvas;
+                try {
+                    canvas = await picker._snapshotPageRect(
+                        windowGlobal, region, backdrop || "rgb(255,255,255)");
+                } catch (e) {
+                    // drawSnapshot can refuse a non-white backdrop. The picker retries on
+                    // white for this; so does this.
+                    if (!backdrop) throw e;
+                    canvas = await picker._snapshotPageRect(
+                        windowGlobal, region, "rgb(255,255,255)");
+                }
+                if (!canvas) return null;
+
+                const blob = await canvas.convertToBlob({ type: "image/png" });
+                return {
+                    bytes: new Uint8Array(await blob.arrayBuffer()),
+                    width: canvas.width,
+                    height: canvas.height
+                };
+            } catch (e) {
+                this.log("a tile refused to be re-captured:", e.message);
+                return null;
+            } finally {
+                picker.destroy();
+            }
+        }
+
+        // A container id we are willing to load into: one that names a container that
+        // actually exists, or 0 for the default jar.
+        //
+        // The id arrives from webcard.userContextId, which is read out of a board file —
+        // hand-editable, and shareable between people. Sanitising it to "a positive integer"
+        // is not the same as sanitising it to "a container you have", and the difference
+        // matters here more than it looks: with the content principal below, a card's load
+        // is a same-site request carrying that jar's cookies. An unbounded id is an
+        // invitation to guess which of them holds a session worth sending.
+        //
+        // Fails to 0 rather than refusing the mount. The default container is the behaviour
+        // every card had before this was recorded, so an id that no longer resolves — a
+        // container the user has since deleted — degrades to an ordinary card instead of a
+        // broken one.
+        // The window global rather than an importESModule of its own: browser.js already
+        // defines it as a lazy ESM getter on the window, and this module has since moved to
+        // a moz-src: URI, so the resource://gre/modules/ path a mod would reach for by habit
+        // no longer resolves. Reading the global is both correct and free.
+        _safeUserContextId(id) {
+            if (!Number.isInteger(id) || id <= 0) return 0;
+            try {
+                return window.ContextualIdentityService.getPublicIdentityFromId(id) ? id : 0;
+            } catch (e) {
+                this.log("could not check container", id, "-", e.message);
+                return 0;
+            }
+        }
+
+        // The principal a card's load is triggered by: the target site's own.
+        //
+        // Same-origin with what is being loaded, so the navigation reads as same-site and
+        // carries the site's SameSite=Strict cookies — and grants nothing the site does not
+        // already have over itself. Deliberately still not the system principal.
+        //
+        // Be clear about what this costs, because it is more authority than the address bar
+        // gives: typing a URL triggers its load from the system principal, which Gecko reads
+        // as `Sec-Fetch-Site: none` with no SameSite=Strict cookies. This reads as
+        // same-origin *with* them. A board is local user data, but it is also a file people
+        // send each other, so a card in an imported board is a one-click same-site GET at a
+        // URL somebody else chose — which is exactly what SameSite=Strict exists to stop.
+        // It is bounded by needing a deliberate click (useLiveWebCard is not honoured on
+        // load), by being a GET, and by _safeUserContextId above refusing to aim it at a
+        // container that does not exist. Worth the trade, worth knowing.
+        //
+        // The origin attributes have to match the browsing context the load lands in, or
+        // the principal describes a different jar than the one the card is using — so the
+        // container and the private flag are carried across exactly as _createBrowser
+        // applied them. Falls back to a null principal if anything here is unusable, which
+        // is the old behaviour and fails closed.
+        _principalFor(spec, options) {
+            try {
+                const attrs = {};
+                if (options.userContextId) attrs.userContextId = options.userContextId;
+                if (options.private) attrs.privateBrowsingId = 1;
+                return Services.scriptSecurityManager.createContentPrincipal(
+                    Services.io.newURI(spec), attrs);
+            } catch (e) {
+                this.log("could not build a principal for", spec, "-", e.message);
+                return Services.scriptSecurityManager.createNullPrincipal({});
             }
         }
 
@@ -2136,9 +2537,10 @@
             if (!tile) return;
             if (this._activeId === objectId) this._activeId = null;
 
-            // Timers and the progress listener outlive the element otherwise. _watchLoad
-            // only clears them when the load settles, and an unmount is precisely the
-            // case where it never does.
+            // Timers and the progress listener outlive the element otherwise. The watch is
+            // deliberately kept up for the life of the tile now — it has to be, to notice a
+            // block page arriving after a challenge cleared — so this is the only place it
+            // is taken down in the ordinary case.
             window.clearTimeout(tile.loadTimer);
             window.clearTimeout(tile.navCheckTimer);
             if (tile.detachListener) {
@@ -2149,6 +2551,15 @@
                 try { tile.detachAudio(); } catch (e) { }
                 tile.detachAudio = null;
             }
+            // The decoy tab this tile was standing behind, if it had one. Removed here
+            // rather than left to destroy(), or a window that opened and closed a hundred
+            // cards would be carrying a hundred hidden tabs.
+            //
+            // The cached instance, deliberately not _tabIdentity(): that one answers null
+            // once the pref is off, so turning the pref off while tiles were running orphaned
+            // every decoy they had until the window closed. What made a tab is what has to
+            // clean it up, whatever the pref says now.
+            if (tile.browser) this._identity?.release(tile.browser);
 
             // Strong reference, unlike _byBrowser — a tile left in here after teardown
             // would keep its wrapper and browser alive until the next flush.
@@ -2268,6 +2679,24 @@
             this._stopPositionLoop();
             this._hideChrome();
             this.unmountAll();
+            // After unmountAll, which releases each tile's decoy as it goes. This is the
+            // backstop for any that did not, and it is what puts getBrowserData back.
+            if (this._identity) {
+                this._identity.destroy();
+                this._identity = null;
+            }
+        }
+
+        // Lazily, and only when the pref is on: the patch it installs is process-wide for
+        // WebExtension code, so a window that never opens a tile never touches it.
+        _tabIdentity() {
+            if (this._identity) return this._identity;
+            const Identity = window.ZenEaselLiveTabIdentity;
+            if (!Identity) return null;
+            const identity = new Identity();
+            if (!identity.enabled) return null;
+            this._identity = identity;
+            return identity;
         }
     }
 

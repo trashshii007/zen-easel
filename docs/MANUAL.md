@@ -103,6 +103,7 @@ uselessly long. An easel you can get lost in has no home to return to.
 | New text box | click the text tool | `T` |
 | Edit text | double-click a text box | `Ctrl`+`Enter` commits |
 | Interact with a live card | click it | `Escape` hands the pointer back |
+| Re-take a live card's picture | the circular arrow in its bar | — |
 | Context menu | right-click | `Menu` key |
 
 ### Tools
@@ -472,6 +473,26 @@ Since the tile takes the mouse once activated, one thing is deliberately routed 
 - **Right-click always gets the easel's menu**, not the website's, so "Show screenshot
   instead" is never out of reach.
 
+### Moving a card's view, and the refresh button
+
+A card made from a screenshot is pinned to the region it was cut from: it does not scroll,
+because scrolling it would mean it was no longer showing what you saved. That holds right
+up until you click into it — while the pointer is inside the card the page scrolls, selects
+and submits normally, which is how you sign in to a site inside a card, and how you fix a
+card whose page has since been redesigned under it. Stepping back out re-pins the card
+wherever you left it, so the site cannot then drift on its own.
+
+That leaves the picture on the front of the card still showing the old view. **The circular
+arrow in the bar re-takes it**: the card's picture becomes what the tile is showing now, and
+the place in the page it opens to moves to match. The button is only there while the card is
+actually running, because both come from the tile's own pixels.
+
+It works on a web tile too, where there is no crop — it pins the thumbnail you are looking
+at as the one the card shows when it is stopped, and remembers the scroll position. That pin
+lasts until you browse the tile somewhere else.
+
+Set `zen.easel.live.reposition` to `false` if you would rather a card never scrolled at all.
+
 Dragging a live card needs nothing special: until you click it, the tile is transparent to
 the pointer, so pressing anywhere on the card and dragging moves it exactly as a screenshot
 would.
@@ -484,8 +505,15 @@ This is the one part of the mod that touches the network, so it is worth being p
   cap). The cap is per *window*, not per board.
 - **A live card loads the site with your normal cookies and session**, exactly as a tab
   would — that is what makes a logged-in dashboard show your data rather than a login
-  screen. Set `zen.easel.live.private` or point `live.container` at a container if you
+  screen. A card captured in a **container tab** reopens in that same container, because
+  that is the session it was showing you; cards captured outside one use your normal
+  session. Set `zen.easel.live.private` or point `live.container` at a container if you
   would rather a board did not carry your session around.
+- **Treat a board file you did not make like any other file someone sent you.** Playing a
+  card loads a URL out of that file as though you had followed a link on the site itself,
+  so an imported board can make a signed-in request you did not intend. It takes a
+  deliberate click — cards never go live on their own — but it is worth knowing before you
+  press play on somebody else's board.
 - **A live card keeps running.** Scrolling it off the board, opening another easel,
   switching tabs and minimising the window all stop it *painting*; none of them stop it
   running. That is the point — a dashboard is no use if it is stale by the time you look
@@ -920,8 +948,10 @@ In Zen's mod preferences, or directly in `about:config`:
 | `zen.easel.live.idle-timeout-min` | `30` | stop a card after this long out of sight; `0` for never |
 | `zen.easel.live.reveal-delay-ms` | `140` | pause before showing live cards again after a tab switch; `0` for none |
 | `zen.easel.live.private` | `false` | load live cards in a private session |
-| `zen.easel.live.container` | `0` | container ID for live cards; `0` is your normal session |
+| `zen.easel.live.container` | `0` | container ID for cards that did not record one of their own; `0` is your normal session |
 | `zen.easel.live.allow-http` | `false` | allow live cards over plain http |
+| `zen.easel.live.reposition` | `true` | let a live card be scrolled while you are using it, so the refresh button can move where it opens to |
+| `zen.easel.live.extension-identity` | `false` | experimental: let extensions treat live cards as tabs, so uBlock Origin's cosmetic filters and Dark Reader apply inside them — adds a hidden tab per running card |
 | `zen.easel.autosave-ms` | `500` | delay after the last change |
 | `zen.easel.storage-dir` | *(empty)* | empty means `<profile>/zen-easels` |
 | `zen.easel.debug` | `false` | `[zen-easel]` logging in the Browser Console |

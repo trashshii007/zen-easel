@@ -27,6 +27,15 @@ export class ZenEaselLiveChild extends JSWindowActorChild {
     // context-menu hand-back stay on for both: neither has anything to do with the crop.
     #scrollLocked = true;
     #selectionLocked = true;
+    // The scrollbar gutter the page had when it was captured, in CSS pixels. Zero means
+    // there was none to reproduce. See #hideScrollbars.
+    #gutter = 0;
+    // Whether the offset is a contract or a starting position. A pinned crop holds its
+    // offset for as long as it lives; a web tile is merely reopened where it was left and
+    // must be free to scroll away the moment the settle watch is done with it. Without this
+    // distinction an offset on a web tile silently became a scroll lock, because the scroll
+    // handler below re-pins on nothing but #offset being set.
+    #repin = true;
     // Agent sheets already loaded into the current document, by URI, and the document they
     // belong to.
     //
@@ -56,8 +65,12 @@ export class ZenEaselLiveChild extends JSWindowActorChild {
     static #SETTLE_CONFIRMATIONS = 3;
 
     receiveMessage(message) {
-        if (message.name === "ZenEaselLive:Configure") {
-            this.#configure(message.data);
+        switch (message.name) {
+            case "ZenEaselLive:Configure":
+                this.#configure(message.data);
+                break;
+            case "ZenEaselLive:Measure":
+                return this.#measure();
         }
         return null;
     }
@@ -66,12 +79,50 @@ export class ZenEaselLiveChild extends JSWindowActorChild {
         this.#offset = data.offset || null;
         this.#scrollLocked = data.lockScroll !== false;
         this.#selectionLocked = data.lockSelection !== false;
+        this.#gutter = data.gutter > 0 ? data.gutter : 0;
+        this.#repin = this.#scrollLocked;
+
+        // Every sheet comes off before any goes back on. A configure is now also how a tile
+        // is *unlocked* — for the repositioning gesture, and so a login form can be reached
+        // at all — and the locks are only half enforced by the flags above. The other half
+        // is agent sheets, which outrank page CSS and which nothing used to take back out:
+        // flipping #selectionLocked while `*{user-select:none!important}` stayed loaded
+        // would leave the tile exactly as unusable as before.
+        this.#unloadSheets();
+
         this.#applyStyleFixes(data.cssPatches);
         this.#pinStyles();
         if (this.#selectionLocked) this.#lockSelection();
         if (this.#scrollLocked) this.#hideScrollbars();
         this.#restoreOffset();
         this.#watchUntilSettled();
+    }
+
+    // What the parent needs to re-baseline this tile: where the page actually sits, and the
+    // layout box it got. Two readers — the refresh button commits `scroll`, and the width
+    // correction is the difference between `clientW` and the box the capture was taken in.
+    //
+    // Deliberately on this actor rather than widening ZenEaselCapture's messageManagerGroups
+    // to reach tiles: this one is already in every tile and already owns the offset.
+    //
+    // Nothing here is content data, and nothing is reported that nobody reads: reading
+    // clientWidth flushes layout, so this is not free, and it is also the ordering barrier a
+    // Configure pushed just before it is waited on with.
+    #measure() {
+        const win = this.contentWindow;
+        if (!win) return null;
+
+        const root = this.document && this.document.documentElement;
+        const clientW = (root && root.clientWidth) || 0;
+        const clientH = (root && root.clientHeight) || 0;
+        // A document with no box has not laid out yet, and its scroll position means
+        // nothing. Height is checked and not reported for exactly that reason.
+        if (!(clientW > 0) || !(clientH > 0)) return null;
+
+        return {
+            scroll: { x: Math.round(win.scrollX), y: Math.round(win.scrollY) },
+            clientW
+        };
     }
 
     handleEvent(event) {
@@ -97,10 +148,43 @@ export class ZenEaselLiveChild extends JSWindowActorChild {
 
             case "wheel":
             case "touchmove":
-                if (this.#scrollLocked) event.preventDefault();
+                if (this.#scrollLocked) {
+                    event.preventDefault();
+                    break;
+                }
+                // An unpinned tile restoring a remembered position keeps asserting it for
+                // up to twenty seconds, so that a page still loading its images cannot
+                // leave the scroll short of where it was clamped. A deliberate scroll ends
+                // that immediately — otherwise the restore spends the rest of its budget
+                // dragging the user back to a position they have just left.
+                this.#abandonOffset();
+                break;
+
+            case "mousedown":
+                // Middle button, which is Gecko about to start an autoscroll — the same
+                // "the user is taking over" signal the wheel above is, arriving as the only
+                // event autoscroll ever produces. Everything after this is scrollBy from the
+                // content process, indistinguishable from a page moving itself, so if the
+                // remembered position is not given up here the settle watch spends the rest
+                // of its twenty seconds dragging the page back under the puck.
+                //
+                // Deliberately not prevented and deliberately not gated on the scroll lock: a
+                // locked crop refuses autoscroll at the browser element instead, and has no
+                // offset to abandon in any case.
+                if (event.button === 1) this.#abandonOffset();
                 break;
 
             case "keydown":
+                // Escape hands the pointer back to the board. The manual has always said it
+                // does, and the easel implements it — but only page-side, and once a tile is
+                // activated the page does not have focus, so the key never reached it. This
+                // is the missing half. Deliberately not preventDefault'd: stepping out of the
+                // card is the easel's business, and whether Escape also closes the site's own
+                // dialog is the site's.
+                if (event.key === "Escape") {
+                    this.sendAsyncMessage("ZenEaselLive:Release", {});
+                    break;
+                }
                 if (this.#scrollLocked && ZenEaselLiveChild.#SCROLL_KEYS.has(event.key)) {
                     event.preventDefault();
                 }
@@ -111,7 +195,7 @@ export class ZenEaselLiveChild extends JSWindowActorChild {
                 break;
 
             case "scroll":
-                this.#restoreOffset();
+                if (this.#repin) this.#restoreOffset();
                 break;
 
             case "click":
@@ -168,7 +252,21 @@ export class ZenEaselLiveChild extends JSWindowActorChild {
     // wrong and an invitation. Only the bars are hidden — deliberately not
     // `overflow: hidden`, which would also stop us restoring a capture taken part-way down
     // a page, since there would no longer be anything to scroll.
+    //
+    // With a gutter to reproduce, the bar is made invisible rather than removed. Taking the
+    // gutter away changes documentElement.clientWidth, which is the box the whole capture is
+    // laid out against — so a tile that simply hid the scrollbar was laying the page out
+    // against a viewport the capture never had. scrollbar-gutter keeps the space whether or
+    // not the document overflows, so the box does not move when a lazy loader makes the page
+    // taller; the transparent colour is what keeps it out of the picture.
     #hideScrollbars() {
+        if (this.#gutter > 0) {
+            this.#loadAgentSheet(
+                "html{scrollbar-gutter:stable!important;" +
+                "scrollbar-color:transparent transparent!important}"
+            );
+            return;
+        }
         this.#loadAgentSheet(
             "html{scrollbar-width:none!important}" +
             "::-webkit-scrollbar{width:0!important;height:0!important}"
@@ -210,6 +308,10 @@ export class ZenEaselLiveChild extends JSWindowActorChild {
             if (this.#settleHits >= ZenEaselLiveChild.#SETTLE_CONFIRMATIONS ||
                 Date.now() > this.#settleDeadline) {
                 this.#stopSettleWatch();
+                // A web tile's offset was a starting position, and it has now started.
+                // Dropped rather than kept, so nothing re-pins a tile the user is free to
+                // scroll — the settle watch is the whole of the guarantee it gets.
+                if (!this.#repin) this.#offset = null;
             }
         };
 
@@ -233,6 +335,15 @@ export class ZenEaselLiveChild extends JSWindowActorChild {
         this.#settleTimer = win.setInterval(check, 400);
     }
 
+    // Gives up on restoring a remembered position, for a tile that was only ever being
+    // *placed* there rather than pinned to it. A pinned crop is untouched: its offset is
+    // the whole contract, and a wheel event over one is prevented before it gets here.
+    #abandonOffset() {
+        if (this.#repin || !this.#offset) return;
+        this.#offset = null;
+        this.#stopSettleWatch();
+    }
+
     #stopSettleWatch() {
         if (this.#settleObserver) {
             try { this.#settleObserver.disconnect(); } catch (e) { }
@@ -252,8 +363,26 @@ export class ZenEaselLiveChild extends JSWindowActorChild {
     // image. Smooth scrolling makes scrollTo asynchronous, so the settle loop would be
     // measuring a position that had not arrived yet. And scrollRestoration would put
     // the session's remembered position back over ours after a navigation.
+    // Gated on there being an offset to protect, not on the scroll lock.
+    //
+    // These exist to stop the engine undoing a restore, and an unpinned tile being placed
+    // back where it was left is doing exactly as much restoring as a pinned crop — it just
+    // stops afterwards. Gated on the lock, a web tile reopening at a remembered position
+    // got none of them: scroll anchoring walked it off the position once per lazy image,
+    // smooth scrolling made the settle loop measure a scroll that had not arrived, and
+    // scrollRestoration put the session's own idea of the position back over ours.
+    //
+    // Unwound as well as applied, which matters because a configure is now also how a tile
+    // is unlocked. The agent sheet comes off with every other in #unloadSheets; the history
+    // flag is not a sheet, so it is put back by hand — a tile with no offset left to protect
+    // has no business suppressing the session's own restore for the rest of its life.
     #pinStyles() {
-        if (!this.#scrollLocked) return;
+        if (!this.#offset) {
+            try {
+                this.contentWindow.history.scrollRestoration = "auto";
+            } catch (e) { }
+            return;
+        }
         // Scoped to the document scroller rather than to `*`. Only the viewport we
         // actually restore can undo our work, and a universal selector in an agent
         // sheet is a style cost on every element of every page a card is opened on.
@@ -310,6 +439,30 @@ export class ZenEaselLiveChild extends JSWindowActorChild {
         } catch (e) {
             // A sheet that will not load costs appearance, not correctness.
         }
+    }
+
+    // The counterpart #loadAgentSheet never had. Without it the locks were one-way: the
+    // flags could be turned off but the sheets enforcing them stayed on the document for as
+    // long as it lived.
+    //
+    // Scoped to the document the sheets were loaded into. A navigation takes its own sheets
+    // with it, and asking the new document to remove one it never had is not an error worth
+    // reporting — but it is worth not leaving stale URIs in the set, or the dedupe in
+    // #loadAgentSheet would refuse to re-add them to the document that does need them.
+    #unloadSheets() {
+        const doc = this.document;
+        if (this.#sheetDoc === doc) {
+            const utils = this.contentWindow?.windowUtils;
+            if (utils) {
+                for (const uri of this.#sheets) {
+                    try {
+                        utils.removeSheetUsingURIString(uri, utils.AGENT_SHEET);
+                    } catch (e) { }
+                }
+            }
+        }
+        this.#sheets.clear();
+        this.#sheetDoc = doc;
     }
 
     #interceptLink(event) {

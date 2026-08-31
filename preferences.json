@@ -156,6 +156,18 @@
     "label": "Allow live cards over plain http.",
     "defaultValue": false
   },
+  {
+    "type": "checkbox",
+    "property": "zen.easel.live.reposition",
+    "label": "Let a live card be scrolled while you are using it, so the refresh button can move where it opens to.",
+    "defaultValue": true
+  },
+  {
+    "type": "checkbox",
+    "property": "zen.easel.live.extension-identity",
+    "label": "Experimental: let extensions treat live cards as tabs, so uBlock Origin's cosmetic filters and Dark Reader apply inside them. Adds a hidden tab per card.",
+    "defaultValue": false
+  },
 
   {
     "type": "separator",

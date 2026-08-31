@@ -47,7 +47,12 @@
                 url: window.ZenEaselObjects.safeExternalUrl(result.url) || "",
                 title: result.title || "",
                 favicon: result.favicon || "",
-                capturedAt: Date.now()
+                capturedAt: Date.now(),
+                // The container the shot was taken in, so the live view reproduces the same
+                // session rather than the default one. Zero means the default container and
+                // is also what an older card reports by not having this at all.
+                userContextId: Number.isInteger(result.userContextId) && result.userContextId > 0
+                    ? result.userContextId : 0
             };
 
             // The geometry that makes a live web card possible. Only present for captures

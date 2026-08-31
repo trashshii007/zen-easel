@@ -26,6 +26,7 @@
         ["ZenEaselCaptureBackdrop", "modules-host/capture-backdrop.uc.js"],
         ["ZenEaselScreenshotHook", "modules-host/screenshot-hook.uc.js"],
         ["ZenEaselSplitResize", "modules-host/split-resize.uc.js"],
+        ["ZenEaselLiveTabIdentity", "modules-host/live-tab-identity.uc.js"],
         ["ZenEaselLiveHost", "modules-host/live-host.uc.js"]
     ];
 
@@ -972,6 +973,10 @@
         // Deliberately reached through the same gZenEaselHost surface as everything
         // else, so the actor needs no handle on the live host itself.
         liveConfigFor(browser) { return this.live?.configFor(browser) ?? null; }
+        // The easel page that owns a given tile's <browser>. Asked by the live parent actor,
+        // which has a tile and needs the board it belongs to rather than whichever easel tab
+        // a walk of the tab list happens to meet first.
+        livePageFor(browser) { return this.live?.pageFor(browser) ?? null; }
 
         // A page opening a board asks what is already running on it, and is told rather than
         // starting again. Synchronous: the answer is needed before the first paint.
@@ -989,6 +994,22 @@
         // snapshotTile.
         liveSnapshotTile(easelId, objectId) {
             return this.live ? this.live.snapshotTile(easelId, objectId) : Promise.resolve(null);
+        }
+        // Where a tile's page actually sits, and the viewport it is laid out in. What the
+        // refresh button re-baselines from. Resolves to null when the tile cannot answer.
+        liveMeasureTile(easelId, objectId) {
+            return this.live ? this.live.measureTile(easelId, objectId) : Promise.resolve(null);
+        }
+        // One rectangle of a tile's document, in document coordinates — the crop a webcard
+        // is, taken again from the live page. See live-host's snapshotTileRect.
+        liveSnapshotTileRect(easelId, objectId, region) {
+            return this.live
+                ? this.live.snapshotTileRect(easelId, objectId, region)
+                : Promise.resolve(null);
+        }
+        // Lets a pinned card be scrolled so it can be repositioned, and re-pins it after.
+        liveSetTileUnlocked(easelId, objectId, unlocked, offset) {
+            this.live?.setTileUnlocked(easelId, objectId, unlocked, offset);
         }
         liveUnmount(easelId, objectId) { this.live?.unmountFor(easelId, objectId); }
         liveUnmountBoard(easelId) { this.live?.unmountBoard(easelId); }

@@ -508,12 +508,27 @@
             element.tools.showContextMenu(point, obj, element.canvas.toWorld(point.x, point.y));
         }
 
+        // Escape was pressed inside a live tile. Same step-out the context menu does first,
+        // on its own: the pointer goes back to the board and the card's bar comes with it.
+        releaseLiveTile() {
+            try { this.element?.live?.deactivate(); } catch (e) { console.error(e); }
+        }
+
         // The host has hidden or re-shown this board's whole layer — a tab switch, a split
         // view change, the window being minimised. The canvas skips a live card's screenshot
         // on the understanding that a <browser> is covering it, so it has to hear about this
         // or the board is a set of holes for as long as the layer is down.
         onLiveBoardPainting(painting) {
             try { this.element?.live?.setHostPainting(painting); } catch (e) { console.error(e); }
+        }
+
+        // A tile settled on a page. Which page it is decides whether it is worth keeping as
+        // the card's picture — an interstitial or an off-origin login wall is not — and it
+        // is also the moment the tile can be asked what layout box it actually got.
+        onLiveTileLanded(objectId, landedUrl, first) {
+            const element = this.element;
+            if (!element || !element.live) return;
+            try { element.live.onLanded(objectId, landedUrl, first); } catch (e) { console.error(e); }
         }
 
         // The host gave up on a tile — refused, errored, timed out or its process died. The

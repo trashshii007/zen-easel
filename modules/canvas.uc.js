@@ -416,6 +416,7 @@
 
             if (inside(chrome.rects.play)) return "play";
             if (inside(chrome.rects.link)) return "link";
+            if (inside(chrome.rects.refresh)) return "refresh";
             // Unpadded, unlike the buttons: the bar's edge is where the card's own surface
             // begins, and padding this one would take a strip of the picture with it.
             const bar = chrome.rects.bar;
@@ -437,10 +438,24 @@
 
             const canToggle = this._canToggleLive(obj);
             const url = this._chromeUrl(obj);
+            // Only a card that is actually running can be re-baselined, because the picture
+            // and the position both come from the tile's own pixels. isLive is false for a
+            // paused card and for one that has never been started, which is exactly the
+            // rule the button wants — so it is asked directly rather than derived.
+            const canRefresh = this._canRefreshLive(obj);
             if (!canToggle && !url) return null;
 
-            const rects = this.renderer.webcardChromeRects(obj, { play: canToggle, link: !!url });
-            return rects ? { rects, canToggle, url } : null;
+            const rects = this.renderer.webcardChromeRects(obj, {
+                play: canToggle,
+                link: !!url,
+                refresh: canRefresh
+            });
+            return rects ? { rects, canToggle, url, canRefresh } : null;
+        }
+
+        _canRefreshLive(obj) {
+            const live = this.host.live;
+            return !!live && live.isLive(obj.id);
         }
 
         // The play/pause button is only offered for a card that can actually do something
@@ -877,7 +892,7 @@
 
             const chrome = this._chromeFor(obj);
             if (!chrome) return null;
-            const { rects, canToggle, url } = chrome;
+            const { rects, canToggle, url, canRefresh } = chrome;
 
             const live = this.host.live;
             const isLive = !!live && live.isLive(obj.id);
@@ -931,6 +946,7 @@
                 showFavicon: !!rects.favicon,
                 showLabel: !!rects.label,
                 canToggle,
+                canRefresh,
                 state: isLive ? "pause" : "play",
                 muted: !!(live && live.isMuted(obj)),
                 hoverPart: this._hoverPart,
@@ -1927,6 +1943,16 @@
                 if (chromePart === "link") {
                     this.select([hit.id]);
                     this.host.capture.openWebcard(hit);
+                    return;
+                }
+                // Re-baselines the card on what its tile is showing now — both the picture
+                // and the place in the page it opens to. Only offered while the tile is
+                // running, which is what makes it the way to correct a card that opened
+                // somewhere the stored geometry did not predict.
+                if (chromePart === "refresh") {
+                    this.select([hit.id]);
+                    this.host.live.refreshTile(hit)
+                        .catch(err => console.error("[zen-easel] could not refresh the card:", err));
                     return;
                 }
             }

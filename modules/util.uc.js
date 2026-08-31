@@ -44,6 +44,7 @@
         "live.container": ["int", 0],
         "split-resize": ["str", "ghost"],
         "live.private": ["bool", false],
+        "live.reposition": ["bool", true],
         "capture-backdrop": ["str", "auto"]
     };
     // zen.easel.favorites is deliberately not here. It is a store rather than a setting — the

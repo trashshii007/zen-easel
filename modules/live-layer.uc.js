@@ -128,6 +128,12 @@
     // itself out; short enough that a tile stopped early still has one.
     const POSTER_AFTER_LOAD_MS = 3000;
 
+    // The widest disagreement between a tile's layout box and its capture's that is still
+    // believable as a scrollbar gutter. Anything larger is a measurement taken of something
+    // else — a page mid-reflow, or one that changed its own overflow — and applying it
+    // would move the crop rather than correct it.
+    const MAX_WIDTH_CORRECTION = 64;
+
     class ZenEaselLiveLayer {
         constructor(host) {
             this.host = host;
@@ -168,6 +174,24 @@
             // Pending post-load poster captures, by object id, so a tile stopped before its
             // timer fires does not snapshot a browser that has gone.
             this._posterTimers = new Map();
+            // Per-tile correction to the content box width, in world units, learned from
+            // what the tile reports its own clientWidth to be once it has settled.
+            //
+            // Kept here rather than applied by the host, because the host cannot keep it:
+            // sync() rebuilds every tile's geometry and re-sends it on every painted frame,
+            // so a width the host set itself is overwritten a frame later. This is folded
+            // into _geometryFor instead, which is the one place the number is authored.
+            this._contentWidthDelta = new Map();
+            // Refreshes in flight, by object id. The button lives on a canvas-drawn bar, so
+            // a double click is two clicks, and each one is a snapshot, a PNG encode and an
+            // asset written to disk. The second would win, the first would be orphaned until
+            // the store's sweep noticed, and both would toast.
+            this._refreshing = new Set();
+        }
+
+        // Whether a pinned card may be unlocked for repositioning when it is clicked into.
+        get repositionEnabled() {
+            return window.ZenEaselUtil.prefs["live.reposition"];
         }
 
         get enabled() {
@@ -207,6 +231,13 @@
 
         isLive(objectId) {
             return this._tiles.has(objectId);
+        }
+
+        // A card whose tile reproduces a crop, as opposed to a window onto a site. Only
+        // these carry locks, and so only these have anything to unlock.
+        _isPinned(objectId) {
+            const obj = this._tiles.get(objectId);
+            return !!(obj && obj.type === "webcard" && obj.webcard && obj.webcard.capture);
         }
 
         // Whether a tile is actually painting right now. Distinct from isLive, and the
@@ -519,6 +550,11 @@
         async _capturePoster(objectId) {
             const obj = this.host.canvas._byId(objectId);
             if (!obj || obj.type !== "webBrowser" || !this.bridge || !this._easelId) return;
+            // A poster the user took deliberately outranks every automatic one. Checked here
+            // rather than at each call site because there are two — the post-landing timer
+            // and the snapshot makeStatic takes on the way out — and only one of them was
+            // ever obvious.
+            if (obj.webBrowser.posterPinned) return;
 
             let shot = null;
             try {
@@ -574,6 +610,250 @@
             this._posterTimers.delete(objectId);
         }
 
+        // The host has told us which page a tile actually settled on. Two things hang off
+        // it, and both used to be done blind at a fixed delay after mount.
+        //
+        // `first` is the tile arriving at the page it was mounted for, as opposed to the
+        // user navigating it somewhere else afterwards.
+        onLanded(objectId, landedUrl, first) {
+            if (!this.isLive(objectId)) return;
+            const obj = this.host.canvas._byId(objectId);
+            if (!obj) return;
+
+            this._correctContentWidth(obj)
+                .catch(e => this.log("could not correct a tile's width:", e.message));
+
+            if (obj.type !== "webBrowser") return;
+            // A deliberate poster is pinned against the page it was taken of, not against
+            // the card for ever. Browsing the tile somewhere else spends it — otherwise the
+            // refresh button was a one-way door, and a card kept showing a picture of a page
+            // its tile had left, with nothing in the UI able to undo it. The mount that
+            // reopens the card is exempt, or reopening would spend the pin before the user
+            // had done anything at all.
+            if (!first && obj.webBrowser.posterPinned) {
+                obj.webBrowser.posterPinned = false;
+                this.host.store.markDirty();
+            }
+            if (!this._worthPhotographing(obj, landedUrl)) {
+                // An interstitial, a login wall on someone else's origin, or a challenge
+                // hop. Whatever poster the card already has is better than a picture of
+                // this, so the pending capture is dropped rather than replaced.
+                this._cancelPoster(objectId);
+                return;
+            }
+            this._schedulePoster(objectId);
+        }
+
+        // Whether a landed page is the page the card was asked for, and therefore worth
+        // keeping as its picture.
+        //
+        // This cannot be exact and is not pretending to be: a login wall served from the
+        // site's own origin looks like the site. It catches the two cases that actually
+        // produced wrong pictures — an off-origin redirect, and an anti-DDoS check — and
+        // the refresh button is the authority for everything it cannot see.
+        _worthPhotographing(obj, landedUrl) {
+            const wanted = this._urlFor(obj);
+            if (!wanted || !landedUrl) return false;
+            try {
+                const asked = new URL(wanted);
+                const landed = new URL(landedUrl);
+                if (asked.origin !== landed.origin) return false;
+                return !/\/cdn-cgi\/|__cf_chl|\/\.well-known\//.test(landed.pathname + landed.search);
+            } catch (e) {
+                return false;
+            }
+        }
+
+        // Ask the tile what layout box it actually ended up with, and correct the content
+        // box by the difference. This is what turns the gutter arithmetic in _geometryFor
+        // from a bet on how Firefox themes scrollbars into something that is measured.
+        //
+        // One shot per tile: the answer is recorded even when it is zero, so a page that
+        // navigates repeatedly cannot walk the width a pixel at a time. Bounded too — a
+        // disagreement wider than a scrollbar is a measurement to distrust, not to apply.
+        async _correctContentWidth(obj) {
+            if (obj.type !== "webcard") return;
+            if (this._contentWidthDelta.has(obj.id)) return;
+
+            const capture = obj.webcard && obj.webcard.capture;
+            if (!capture || !capture.webContentSize) return;
+
+            let measured = null;
+            try {
+                measured = await this.bridge?.liveMeasureTile(this._easelId, obj.id);
+            } catch (e) {
+                this.log("could not measure a tile:", e.message);
+            }
+            if (!measured || !(measured.clientW > 0)) return;
+            // The tile can have gone in the time that took.
+            if (!this.isLive(obj.id)) return;
+
+            const delta = Math.round(capture.webContentSize.w - measured.clientW);
+            const usable = Math.abs(delta) >= 1 && Math.abs(delta) <= MAX_WIDTH_CORRECTION;
+            this._contentWidthDelta.set(obj.id, usable ? delta : 0);
+            if (!usable) return;
+
+            this.log("correcting a tile's content width by", delta, "for", obj.id);
+            this.host.canvas.invalidate();
+        }
+
+        /* ---------------------------------------------------------- refresh */
+
+        // Re-baselines a running tile: the picture the card shows when it is not live is
+        // replaced with what the tile is showing now, and — the part that matters — the
+        // place in the page the tile opens to is moved to wherever it has been scrolled.
+        //
+        // This is the answer to every way the reconstruction can land somewhere the stored
+        // geometry did not predict: a login wall, an anti-DDoS check, a layout that reflowed
+        // because the viewport was not quite the one it was captured in. None of those can
+        // be detected reliably from outside, so rather than guess, the user puts the tile
+        // where it belongs and presses this.
+        //
+        // Best-effort throughout, like the poster path: every failure leaves the card
+        // exactly as it was.
+        async refreshTile(obj) {
+            if (!obj || !this.isLive(obj.id) || !this.bridge || !this._easelId) return false;
+            if (this._refreshing.has(obj.id)) return false;
+            this._refreshing.add(obj.id);
+            try {
+                return await this._refreshTile(obj);
+            } finally {
+                // In a finally rather than at each exit: this runs through several awaits
+                // and a detach mid-flight would otherwise leave the card unable to refresh
+                // again for the rest of the session.
+                this._refreshing.delete(obj.id);
+            }
+        }
+
+        async _refreshTile(obj) {
+            // Three ways this gives up, and they mean completely different things — the
+            // actor not answering, the page refusing to be drawn, and the write failing.
+            // One toast for all three is right for the user and useless for anyone working
+            // out which happened, so the reason is always logged before it is swallowed.
+            const fail = why => {
+                this.log("refresh failed for", obj.id, "-", why);
+                this.host.toast("That card could not be refreshed");
+                return false;
+            };
+
+            let measured = await this.bridge.liveMeasureTile(this._easelId, obj.id);
+            if (!measured || !measured.scroll) {
+                // Overwhelmingly the restart case: ZenEaselLive:Measure is new, and until
+                // the content process reloads the child ESM the old actor answers null to
+                // a message it has never heard of.
+                return fail("the tile did not answer ZenEaselLive:Measure — is Zen restarted?");
+            }
+
+            // Pinned *before* the picture is taken, not after. Two things depend on it and
+            // both are silent when it is wrong. An unlocked tile has no gutter reproduced —
+            // #hideScrollbars is gated on the scroll lock — so it is laid out at a different
+            // width than the one the card will show once it is locked again, and the crop
+            // would be of a layout that never appears. And an unpinned page is free to move
+            // between the measure and the snapshot, which would commit an offset that does
+            // not match the pixels beside it.
+            //
+            // The second measure is the barrier: it is a sendQuery on the same actor as the
+            // configure above, so it cannot be answered until that has been applied, and it
+            // reports where the re-pin actually landed — which is not always where it was
+            // asked to, since a scroll clamps to the document height it finds.
+            if (this._isPinned(obj.id)) {
+                this.bridge.liveSetTileUnlocked(this._easelId, obj.id, false, measured.scroll);
+                const settled = await this.bridge.liveMeasureTile(this._easelId, obj.id);
+                if (!this.isLive(obj.id)) return false;
+                if (settled && settled.scroll) measured = settled;
+            }
+
+            const shot = obj.type === "webcard"
+                ? await this._recropWebcard(obj, measured)
+                : await this._resnapWebTile(obj.id);
+            if (!shot || !shot.bytes || !shot.bytes.length) {
+                return fail("the tile produced no pixels");
+            }
+
+            let asset = "";
+            try {
+                asset = await this.host.store.saveAsset(shot.bytes, "png");
+            } catch (e) {
+                this.log("could not save a refreshed card:", e.message);
+            }
+            if (!asset) return fail("the new picture could not be written to disk");
+
+            // Re-read across the awaits, the same way _capturePoster does: a snapshot takes
+            // a frame or two to encode and the card can be deleted or undone away inside
+            // that window, which would leave an asset on disk owned by nothing.
+            const target = this.host.canvas._byId(obj.id);
+            if (!target || target.type !== obj.type) return false;
+
+            if (target.type === "webcard") {
+                const capture = target.webcard.capture;
+                if (!capture) return false;
+                target.webcard.asset = asset;
+                // Only the offset moves. webContentSize and viewport are what the tile is
+                // laid out *from*, so re-measuring them here would be circular — the tile
+                // reports back the box we gave it — and frameRelativeToViewport is
+                // invariant, because the tile's visible region is always exactly the frame
+                // within its viewport however far down the page that viewport has moved.
+                capture.webContentOffset = { x: measured.scroll.x, y: measured.scroll.y };
+            } else {
+                target.webBrowser.poster = asset;
+                // Deliberate, so no automatic capture overwrites it — but pinned against
+                // this page rather than against the card, and spent the moment the tile is
+                // browsed somewhere else. See onLanded.
+                target.webBrowser.posterPinned = true;
+                target.webBrowser.scrollOffset = { x: measured.scroll.x, y: measured.scroll.y };
+            }
+
+            // Straight onto the object rather than through a mutation, for the reason the
+            // poster path gives: a picture is a cache of what the card was showing, and
+            // putting it on the undo stack would make Ctrl+Z step back through pictures
+            // instead of through the things the user actually did. The offset travels with
+            // it because the two are one fact — this picture, taken there.
+            this.host.store.markDirty();
+            this.log("refreshed", target.type, obj.id, "-> offset",
+                JSON.stringify(measured.scroll), "asset", asset);
+
+            this.host.canvas.invalidate();
+            this.host.toast("Card refreshed");
+            return true;
+        }
+
+        // The crop a webcard is, taken again from the live page. Document coordinates, the
+        // same convention the capture picker uses — the tile's current scroll offset plus
+        // the frame's position within the viewport. See the host's snapshotTileRect for how
+        // the picture itself is taken.
+        async _recropWebcard(obj, measured) {
+            const capture = obj.webcard && obj.webcard.capture;
+            if (!capture) return null;
+
+            const frame = capture.frameRelativeToViewport;
+            const left = measured.scroll.x + frame.x;
+            const top = measured.scroll.y + frame.y;
+
+            try {
+                return await this.bridge.liveSnapshotTileRect(this._easelId, obj.id, {
+                    left,
+                    top,
+                    right: left + frame.w,
+                    bottom: top + frame.h,
+                    devicePixelRatio: window.devicePixelRatio || 1
+                });
+            } catch (e) {
+                this.log("could not re-crop a card:", e.message);
+                return null;
+            }
+        }
+
+        // A web tile has no crop, so its refresh is the ordinary whole-tile poster — just
+        // taken on demand rather than on a timer, and pinned once it lands.
+        async _resnapWebTile(objectId) {
+            try {
+                return await this.bridge.liveSnapshotTile(this._easelId, objectId);
+            } catch (e) {
+                this.log("could not snapshot a tile:", e.message);
+                return null;
+            }
+        }
+
         /* ---------------------------------------------------------- mounting */
 
         async _mount(obj) {
@@ -593,15 +873,28 @@
             this._tiles.set(obj.id, obj);
 
             const capture = obj.type === "webBrowser" ? null : obj.webcard.capture;
+            this.log("mounting", obj.type, obj.id, "at offset", JSON.stringify(
+                capture ? capture.webContentOffset
+                    : (obj.type === "webBrowser" ? obj.webBrowser.scrollOffset : null)));
             let ok = false;
             try {
                 ok = await bridge.liveMount(easelId, obj.id, url, this._geometryFor(obj), {
-                    userContextId: this._userContextId(),
+                    userContextId: this._userContextId(obj),
                     private: !!window.ZenEaselUtil.prefs["live.private"],
                     // The locks exist to protect a crop, so a tile with no crop declines
                     // them: a web tile is a window onto a site, not a pinned view of one.
                     pinned: !!capture,
-                    scrollOffset: capture ? capture.webContentOffset : null,
+                    // A crop's offset is a contract and is held for life. A web tile's is a
+                    // place it was last left by the refresh button, restored once and then
+                    // let go of — see ZenEaselLiveChild's #repin.
+                    scrollOffset: capture
+                        ? capture.webContentOffset
+                        : (obj.type === "webBrowser" ? obj.webBrowser.scrollOffset : null),
+                    // How much of the content box is scrollbar gutter rather than page. The
+                    // tile reinstates exactly this much, invisibly, so its layout box comes
+                    // out the width the capture was taken at. Zero means "nothing to
+                    // reproduce" — which is also what an older capture reports.
+                    gutter: this._gutterFor(capture),
                     muted: this.isMuted(obj)
                 });
             } catch (e) {
@@ -617,8 +910,23 @@
             // The static canvas must stop painting the screenshot underneath, or it would
             // show through wherever the site is transparent.
             this.host.canvas.invalidate();
-            if (obj.type === "webBrowser") this._schedulePoster(obj.id);
+            // The poster is deliberately *not* scheduled here. A timer started at mount
+            // fires whether or not the tile has arrived anywhere worth photographing, which
+            // is how a card ended up with a picture of "Sign in to continue" or "Checking
+            // your browser" as the thing it shows when it is not running. It is scheduled
+            // from onLiveTileLanded instead, once the host says which page the tile actually
+            // settled on — and a challenge that navigates again restarts that, so the
+            // interstitial is skipped rather than photographed.
             return true;
+        }
+
+        // The width of the scrollbar gutter this capture was taken with, in CSS pixels.
+        // Zero when there was none, and zero for a capture that predates the measurement —
+        // which lays the tile out exactly as it always was.
+        _gutterFor(capture) {
+            if (!capture || !capture.viewport || !capture.webContentSize) return 0;
+            const gutter = Math.round(capture.viewport.w - capture.webContentSize.w);
+            return gutter > 0 ? gutter : 0;
         }
 
         _unmount(objectId) {
@@ -627,6 +935,10 @@
             this._offscreenSince.delete(objectId);
             this._offscreen.delete(objectId);
             this._suppressed.delete(objectId);
+            // Belongs to a running tile, not to the card. A width correction was measured
+            // from this mount and the next one starts by measuring again; leaving it behind
+            // would apply one page's gutter to another page's layout.
+            this._contentWidthDelta.delete(objectId);
             this._tiles.delete(objectId);
             if (this._activeId === objectId) this._activeId = null;
 
@@ -650,15 +962,31 @@
         // reason: calling back into a host that has moved on would be a loop.
         forget(objectId) {
             if (!this._tiles.has(objectId)) return;
+            this._cancelPoster(objectId);
             this._offscreenSince.delete(objectId);
             this._offscreen.delete(objectId);
             this._suppressed.delete(objectId);
+            this._contentWidthDelta.delete(objectId);
             this._tiles.delete(objectId);
             if (this._activeId === objectId) this._activeId = null;
             this.host.canvas.invalidate();
         }
 
-        _userContextId() {
+        // The container a card's live view should load in.
+        //
+        // The card's own, first: a capture records which container the page was open in, and
+        // cookies are keyed on exactly that. Reproducing a shot taken in a container tab
+        // inside the default container means a different session or none — which is the whole
+        // of "the card shows me signed out while the same site in a tab is signed in", and it
+        // is invisible from the page because every other thing about the load is identical.
+        //
+        // The pref stays as the override for cards captured before this was recorded, and as
+        // the way to force every card into one container deliberately.
+        _userContextId(obj) {
+            const own = obj && obj.type === "webcard" && obj.webcard
+                ? obj.webcard.userContextId : 0;
+            if (Number.isInteger(own) && own > 0) return own;
+
             const id = window.ZenEaselUtil.prefs["live.container"];
             return Number.isInteger(id) && id > 0 ? id : 0;
         }
@@ -822,9 +1150,33 @@
             // clicked card reaches the board exactly as it always did.
             const scale = frame.w > 0 ? (obj.w * zoom) / frame.w : zoom;
 
+            // The content box is the viewport the page was captured in, not its layout box.
+            // The two differ by the scrollbar gutter, and that difference is invisible right
+            // up until a site consults window.innerWidth, a vw unit or a @media (width) —
+            // all of which resolve against the scrollbar-*inclusive* box. Laying the tile
+            // out at the exclusive one put every responsive site a gutter narrower than it
+            // had been, which near a breakpoint is a different layout altogether and a crop
+            // pointing at whatever moved into its place.
+            //
+            // frame is measured from the viewport's top-left, the same origin in both boxes,
+            // so neither the scale above nor the offset below changes. The gutter sits at
+            // the far edge, outside every frame a capture would have accepted.
+            //
+            // Older captures have no viewport recorded and lay out exactly as they always
+            // did — the field is read as "unknown", never as "there was no gutter".
+            const content = capture.viewport
+                ? { w: capture.viewport.w, h: capture.viewport.h }
+                : { w: size.w, h: size.h };
+
+            // What the tile said about its own layout box once it settled, if it disagreed.
+            // See _correctContentWidth: this is the correction that makes the gutter
+            // arithmetic above answerable rather than a bet on how Firefox themes scrollbars.
+            const delta = this._contentWidthDelta.get(obj.id) || 0;
+            if (delta) content.w += delta;
+
             return {
                 rect: { x: origin.x, y: origin.y, w: obj.w * zoom, h: obj.h * zoom },
-                content: { w: size.w, h: size.h },
+                content,
                 // Post-scale, because the host applies this as a plain offset alongside the
                 // transform rather than inside it.
                 offset: { x: -frame.x * scale, y: -frame.y * scale },
@@ -888,6 +1240,19 @@
             // Also refreshes the LRU: the card being used should be the last one evicted.
             // The order itself is the host's, because the cap is.
             this.bridge?.liveActivate(this._easelId, objectId);
+
+            // Clicking into a pinned card lifts its locks. Until this, a webcard tile could
+            // not be scrolled, selected or submitted at all — which made two things
+            // impossible that the card badly needs: correcting a tile that opened to the
+            // wrong part of the page, and logging in to a site that wants a session before
+            // it will show you anything.
+            //
+            // The unlock lasts exactly as long as the pointer is inside the card; deactivate
+            // re-pins it wherever it has been left. See _relockTile for why that is not the
+            // same as undoing the repositioning.
+            if (this.repositionEnabled && this._isPinned(objectId)) {
+                this.bridge?.liveSetTileUnlocked(this._easelId, objectId, true);
+            }
             // The tile has the pointer now, so the board will not hear it move again until
             // it is handed back — and the hover bar would otherwise stay parked over a site
             // that is being used. This is the whole of "interacting with a live tile hides
@@ -898,12 +1263,45 @@
 
         deactivate() {
             if (!this._activeId) return;
+            const wasActive = this._activeId;
             this._activeId = null;
             this.bridge?.liveDeactivate();
+            if (this.repositionEnabled && this._isPinned(wasActive)) {
+                this._relockTile(wasActive)
+                    .catch(e => this.log("could not re-pin a card:", e.message));
+            }
             // The pointer is back on the board and has not moved, so no event is coming to
             // say what it is resting on. Almost always that is the card just stepped out of,
             // whose bar should reappear rather than wait for a twitch of the mouse.
             this.host.canvas?.refreshHover();
+        }
+
+        // Puts the locks back on a card that was unlocked for repositioning, pinned to
+        // wherever the tile now sits rather than to where it started.
+        //
+        // That distinction is the whole point, and it is why this does not undo the gesture:
+        // a card scrolled to a new position is re-pinned *at the new position*, so the
+        // refresh button still commits exactly what is on screen. What the re-pin buys back
+        // is the guarantee the card exists for — an unlocked tile has no offset and no
+        // scroll lock, so the site's own scrollIntoView, a fragment link or a lazy loader is
+        // free to walk the crop off the region that was captured, silently and for the rest
+        // of the tile's life. Leaving that on after a single click was too high a price for
+        // a gesture most clicks are not performing.
+        //
+        // Best-effort: a measure that fails still re-locks, falling back to the offset the
+        // host stashed at unlock time, because a stale pin beats no pin at all.
+        async _relockTile(objectId) {
+            let measured = null;
+            try {
+                measured = await this.bridge?.liveMeasureTile(this._easelId, objectId);
+            } catch (e) {
+                this.log("could not measure a tile before re-pinning it:", e.message);
+            }
+            // The tile can have been stopped, evicted or re-activated while that was in
+            // flight; re-locking one the pointer is back inside would fight the user.
+            if (!this.isLive(objectId) || this._activeId === objectId) return;
+            this.bridge?.liveSetTileUnlocked(
+                this._easelId, objectId, false, measured?.scroll || null);
         }
 
         /* ---------------------------------------------------------- gestures */
@@ -961,6 +1359,14 @@
                     continue;
                 }
                 this._tiles.set(objectId, obj);
+                // Adopted tiles are re-measured rather than assumed. _correctContentWidth is
+                // otherwise only reached from onLanded, and a tile being adopted landed long
+                // ago — so a page reload, which builds a fresh layer with an empty map, left
+                // every running webcard laid out at the uncorrected width with nothing able
+                // to notice. The one-shot guard inside makes this free for the common case
+                // where the layer is the same one that measured it.
+                this._correctContentWidth(obj)
+                    .catch(e => this.log("could not correct an adopted tile's width:", e.message));
             }
             this.host.canvas.invalidate();
         }
@@ -996,6 +1402,11 @@
             this._suppressed.clear();
             this._gestureIds = [];
             this._activeId = null;
+            // _contentWidthDelta is deliberately *not* cleared here, unlike everything
+            // above. This is the view being forgotten, not the tiles: a board switch leaves
+            // them running on the host, and attach() adopts them back at the same width they
+            // are still laid out at. The entries go where the tile goes, and the only place
+            // that is, is _unmount and forget.
         }
 
         // The tab was backgrounded or the window minimised. Painting stops; nothing else

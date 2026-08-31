@@ -345,6 +345,12 @@
   mask-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12"><path d="M4 1.6h6.4V8h-1.6V4.3L3.1 10 2 8.9l5.7-5.7H4z"/></svg>');
 }
 
+/* A circular arrow: re-take this card's picture where the tile is now looking. Shown only
+ * while the tile is running, which is the whole of what distinguishes it from play. */
+.zen-easel-card-chrome-button.is-refresh::before {
+  mask-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12"><path d="M6 1.4a4.6 4.6 0 1 0 4.36 6.05l-1.24-.41A3.3 3.3 0 1 1 6 2.7c.9 0 1.72.36 2.32.94L6.7 5.25h3.9V1.35L9.25 2.7A4.58 4.58 0 0 0 6 1.4z"/></svg>');
+}
+
 /* Only when muted, so a board where nobody has touched the setting looks exactly as it
  * did — the ring is a state worth noticing, not a control worth advertising. */
 .zen-easel-card-chrome-button.is-play[data-muted] {

@@ -20,8 +20,22 @@ export class ZenEaselLiveParent extends JSWindowActorParent {
             case "ZenEaselLive:Ready":
                 this.#sendConfig();
                 break;
+            case "ZenEaselLive:Release":
+                this.#release();
+                break;
         }
         return null;
+    }
+
+    // Escape inside a tile. The page owns activation, so it is the page that is told —
+    // through the same easel-page surface the context menu uses, and for the same reason:
+    // once a tile has the pointer, the board is not hearing anything itself.
+    #release() {
+        try {
+            this.#easelPage()?.releaseLiveTile();
+        } catch (e) {
+            console.error("[zen-easel] could not step out of a live tile:", e);
+        }
     }
 
     // The child announcing itself, on every DOMContentLoaded and pageshow. It is the
@@ -43,12 +57,21 @@ export class ZenEaselLiveParent extends JSWindowActorParent {
 
     // A tile's <browser> lives in the *browser window*, not in the easel page — the page is
     // a system-principal document and cannot host one. So the embedder leads to the chrome
-    // window, and the easel page has to be found from there by walking its tabs. Same
-    // process throughout, so these stay direct calls rather than IPC.
+    // window, and the host is asked which board owns this particular tile. Same process
+    // throughout, so these stay direct calls rather than IPC.
+    //
+    // The host is asked rather than the tabs walked, because a window can have more than
+    // one easel open and the walk returns whichever it meets first. Stepping out of a tile
+    // then handed the pointer back on somebody else's board, and the card menu opened over
+    // it. The tab walk is kept only as the fallback for a host that cannot answer.
     #easelPage() {
-        const chrome = this.browsingContext?.embedderElement?.ownerGlobal ??
-            this.browsingContext?.topChromeWindow;
+        const browser = this.browsingContext?.embedderElement;
+        const chrome = browser?.ownerGlobal ?? this.browsingContext?.topChromeWindow;
         if (!chrome || !chrome.gBrowser) return null;
+
+        const owned = browser ? chrome.gZenEaselHost?.livePageFor(browser) : null;
+        if (owned) return owned;
+
         for (const tab of chrome.gBrowser.tabs) {
             const page = tab.linkedBrowser?.contentWindow?.gZenEaselPage;
             if (page) return page;

@@ -376,6 +376,12 @@
                 url: browser.currentURI ? browser.currentURI.spec : "",
                 title: this._titleFor(browser),
                 favicon: this._faviconFor(browser),
+                // The same shape captureContentRegion builds, container included. A shot
+                // moved here from Zen's screenshot UI is as much "the site as I was seeing
+                // it" as one dragged out with the region picker, and omitting this left
+                // exactly one path that still reproduced a container tab's card in the
+                // default container.
+                userContextId: window.ZenEaselCaptureHost._userContextIdOf(browser),
                 capture: await this._previewLayout(browser, width, height)
             };
         }
@@ -393,16 +399,19 @@
         async _previewLayout(browser, width, height) {
             try {
                 const picker = new window.ZenEaselCaptureHost();
-                let viewport;
+                // `measured` rather than `viewport`: the result carries a viewport *field*
+                // of its own now — the scrollbar-inclusive box — and viewport.viewport
+                // reads like a typo.
+                let measured;
                 try {
-                    viewport = await picker.measureViewport(browser);
+                    measured = await picker.measureViewport(browser);
                 } finally {
                     picker.destroy();
                 }
-                if (!viewport) return null;
+                if (!measured) return null;
 
                 const dpr = (window.devicePixelRatio || 1) * (browser.fullZoom || 1);
-                const { w, h } = viewport.webContentSize;
+                const { w, h } = measured.webContentSize;
 
                 // Generous tolerance: the capture is rounded to device pixels and the
                 // measured box excludes the scrollbar gutter, so exact equality never holds.
@@ -411,8 +420,12 @@
 
                 return {
                     type: "visiblePage",
-                    webContentSize: viewport.webContentSize,
-                    webContentOffset: viewport.webContentOffset,
+                    webContentSize: measured.webContentSize,
+                    // Carried through like the rest. The frame below is built from the
+                    // scrollbar-*exclusive* box, which stays the right origin and size for
+                    // the crop whichever box the tile is laid out in.
+                    viewport: measured.viewport || null,
+                    webContentOffset: measured.webContentOffset,
                     frameRelativeToViewport: { x: 0, y: 0, w, h }
                 };
             } catch (e) {

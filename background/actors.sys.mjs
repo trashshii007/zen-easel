@@ -73,6 +73,11 @@ export const ACTOR_OPTIONS = {
                 load: { createActor: false },
                 wheel: { capture: true, mozSystemGroup: true },
                 touchmove: { capture: true, mozSystemGroup: true },
+                // Middle-click autoscroll is the third way to move a tile, and the only one
+                // that produces no wheel and no key. Gecko starts it from mousedown, so that
+                // is where the child has to notice a deliberate scroll and stop asserting a
+                // remembered position over it. See ZenEaselLiveChild's #abandonOffset.
+                mousedown: { capture: true, mozSystemGroup: true },
                 keydown: { capture: true, mozSystemGroup: true },
                 selectstart: { capture: true, mozSystemGroup: true },
                 click: { capture: true, mozSystemGroup: true },

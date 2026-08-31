@@ -22,15 +22,17 @@ export class ZenEaselCaptureChild extends JSWindowActorChild {
         return null;
     }
 
-    // The layout box the page was laid out in, and where it was scrolled to.
+    // Where the page was scrolled to, and both of the boxes it was laid out against —
+    // because a live tile needs both and they are not the same number.
     //
-    // documentElement.clientWidth/Height, deliberately not innerWidth/innerHeight. The
-    // two differ by the classic scrollbar gutter, and the live tile hides scrollbars
-    // (see ZenEaselLiveChild.#hideScrollbars) so that its own edge is not an invitation
-    // to scroll a pinned card. That makes the tile's layout box the scrollbar-free one,
-    // so measuring the scrollbar-inclusive one here laid the live page out ~15px wider
-    // than it had been at capture. Every responsive site then reflowed, and the stored
-    // crop pointed at whatever had moved into its place.
+    // webContentSize is documentElement.clientWidth/Height: the layout box, scrollbar
+    // gutter excluded. It is what the captured frame's coordinates are validated against.
+    // viewport is innerWidth/innerHeight, gutter included, and it is what media queries,
+    // vw units and window.innerWidth all resolve against — so it is the box a tile has to
+    // reproduce, gutter and all, or every responsive site lays out ~15px narrower than it
+    // did here and the stored crop points at whatever moved into its place. The tile
+    // reinstates the gutter invisibly rather than removing it; see
+    // ZenEaselLiveChild.#hideScrollbars.
     #measure() {
         const win = this.contentWindow;
         const doc = this.document;
@@ -43,6 +45,9 @@ export class ZenEaselCaptureChild extends JSWindowActorChild {
 
         return {
             webContentSize: { w, h },
+            // Recorded rather than derived: only this side can see the gutter the page
+            // actually had.
+            viewport: { w: win.innerWidth, h: win.innerHeight },
             webContentOffset: { x: Math.round(win.scrollX), y: Math.round(win.scrollY) },
             // Whether the document itself is what scrolls. A site that scrolls an inner
             // container instead reports scrollX/Y of 0 no matter how far down the page

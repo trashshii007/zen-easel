@@ -837,7 +837,7 @@
         // and favicon take what is left. A narrow card — a phone-shaped capture, say —
         // therefore keeps its controls and loses its title, rather than losing the bar and
         // with it the only way to play the card without going to the context menu.
-        webcardChromeRects(obj, has = { play: true, link: true }) {
+        webcardChromeRects(obj, has = { play: true, link: true, refresh: false }) {
             if (!obj) return null;
             if (obj.type !== "webcard" && obj.type !== "webBrowser") return null;
             if (obj.h < CHROME_MIN_HEIGHT) return null;
@@ -861,14 +861,19 @@
                 return rect;
             };
 
-            const wanted = (has.link ? 1 : 0) + (has.play ? 1 : 0);
+            const wanted = (has.link ? 1 : 0) + (has.play ? 1 : 0) + (has.refresh ? 1 : 0);
             const buttonsWidth = wanted * CHROME_BUTTON + Math.max(wanted - 1, 0) * CHROME_GAP;
             // Not even one button fits between the paddings, so there is no bar worth
             // drawing. This is the only width that turns the chrome off outright.
             if (bar.w < CHROME_PAD * 2 + buttonsWidth || buttonsWidth === 0) return null;
 
+            // Taken in reverse of the order they are drawn, because take() walks leftwards
+            // from the bar's right edge. link is claimed first and is therefore the
+            // rightmost; refresh is claimed last and sits left of play, which is where the
+            // DOM's flex row puts it too.
             const link = has.link ? take() : null;
             const play = has.play ? take() : null;
+            const refresh = has.refresh ? take() : null;
 
             // `right` is now one gap to the left of the leftmost button, which is exactly
             // where the content before it has to stop — CHROME_GAP is the flex row's `gap`,
@@ -899,7 +904,7 @@
                 h: bar.h
             } : null;
 
-            return { bar, favicon, label, play, link };
+            return { bar, favicon, label, play, link, refresh };
         }
 
         // Arc's webBrowser object. Unlike a webcard there is no screenshot to fall back on:
