@@ -7,7 +7,8 @@
 //
 // The easel itself is a document now — about:easel, in its own tab. What stays behind in
 // browser.xhtml is only what genuinely cannot live in a page: taking a snapshot of
-// whatever tab you are looking at, hooking Zen's own screenshot UI, and the toolbar button.
+// whatever tab you are looking at, hooking Zen's own screenshot UI, the toolbar button,
+// and the "New Easel" entries on Zen's create-new menu and omnibox.
 //
 // Everything this exposes to the page goes through gZenEaselHost, and every value that
 // crosses is a plain string, number or byte array. The page holds a reference to this
@@ -55,6 +56,11 @@
     // feature degrades to an uglier address bar rather than to nothing.
     const ABOUT_URL = "about:easel";
     const CHROME_URL = BASE + "page/easel.xhtml";
+    // Same glyph the easel tab carries. The create-new popup already sets
+    // -moz-context-properties: fill on its menuitems, which is what this file needs.
+    const BOARD_ICON = BASE + "resources/zen-easel-board.svg";
+    const CREATE_COMMAND_ID = "cmd_zenEaselNew";
+    const CREATE_MENUITEM_ID = "zen-easel-create-new";
 
     function easelPageUrl(easelId, { glance = false } = {}) {
         let base;
@@ -120,6 +126,12 @@
                 // the overlay out from under a split.
                 this._hookGlanceExpand();
 
+                // Sidebar + menu and the omnibox "Actions" list. Same command as
+                // Create Folder / New Split: a XUL <command> the menuitem and the
+                // urlbar both fire. The popup is in the window from the start, unlike
+                // CustomizableUI, so this does not wait.
+                this._installCreateNew();
+
                 // CustomizableUI is not ready at script-load time on a cold start.
                 this._buttonTimer = setTimeout(() => this._createToolbarButton(), 2000);
                 log("host ready");
@@ -151,6 +163,115 @@
                 // after the first, not an error worth surfacing.
                 log("widget not created:", e.message);
             }
+        }
+
+        /* ------------------------------------------ create-new menu and omnibox */
+
+        // One <command> in this window. The sidebar + menu points at it, and so does
+        // the omnibox action: Zen's urlbar provider does getElementById(command).doCommand()
+        // on a string id, which is why Create Folder and New Split share their commands
+        // across both surfaces. A click listener plus a separate function action would
+        // work, but it would be two wirings for the same thing.
+        _installCreateNew() {
+            this._onCreateNewCommand = () => {
+                this.createEasel().catch(e => {
+                    console.error("[zen-easel] could not create easel:", e);
+                    this.toast("Could not create an easel");
+                });
+            };
+
+            // Sine re-runs this script; destroy() should have taken the previous nodes
+            // with it, but a failed teardown would otherwise leave a second row.
+            document.getElementById(CREATE_COMMAND_ID)?.remove();
+            document.getElementById(CREATE_MENUITEM_ID)?.remove();
+
+            const commands = document.getElementById("zenCommandSet");
+            if (!commands) {
+                log("zenCommandSet not found; skipping create-new command");
+                return;
+            }
+
+            const command = document.createXULElement("command");
+            command.id = CREATE_COMMAND_ID;
+            command.addEventListener("command", this._onCreateNewCommand);
+            commands.appendChild(command);
+
+            const popup = document.getElementById("zenCreateNewPopup");
+            if (popup) {
+                const item = document.createXULElement("menuitem");
+                item.id = CREATE_MENUITEM_ID;
+                item.setAttribute("class", "menuitem-iconic");
+                item.setAttribute("label", "New Easel");
+                item.setAttribute("image", BOARD_ICON);
+                item.setAttribute("command", CREATE_COMMAND_ID);
+                // Above New Split, in the same group as Split / Tab. insertBefore with
+                // a missing sibling is appendChild, so a Zen layout change still lands
+                // the row in the menu rather than throwing.
+                const split = popup.querySelector('[command="cmd_zenNewEmptySplit"]');
+                popup.insertBefore(item, split);
+            } else {
+                log("zenCreateNewPopup not found; omnibox action still registered");
+            }
+
+            this._installOmniboxAction();
+        }
+
+        // globalActions is a process-wide module singleton. Every window's host reaches
+        // the same array, so this pushes at most once and replaces on rebuild rather than
+        // stacking. destroy() only splices it out once no remaining window still has
+        // cmd_zenEaselNew; isAvailable also requires that node, so a leftover entry
+        // cannot show a dead row.
+        _globalActions() {
+            const { globalActions } = ChromeUtils.importESModule(
+                "resource:///modules/ZenUBGlobalActions.sys.mjs"
+            );
+            return Array.isArray(globalActions) ? globalActions : null;
+        }
+
+        _installOmniboxAction() {
+            try {
+                const globalActions = this._globalActions();
+                if (!globalActions) return;
+
+                const action = {
+                    label: "New Easel",
+                    icon: BOARD_ICON,
+                    command: CREATE_COMMAND_ID,
+                    commandId: CREATE_COMMAND_ID,
+                    extraPayload: {},
+                    isAvailable: win => {
+                        const cmd = win?.document?.getElementById(CREATE_COMMAND_ID);
+                        return !!cmd && cmd.getAttribute("disabled") !== "true";
+                    }
+                };
+                const existing = globalActions.findIndex(a => a.commandId === CREATE_COMMAND_ID);
+                if (existing >= 0) globalActions.splice(existing, 1, action);
+                else globalActions.push(action);
+            } catch (e) {
+                log("omnibox action not registered:", e.message);
+            }
+        }
+
+        _uninstallOmniboxAction() {
+            try {
+                const globalActions = this._globalActions();
+                if (!globalActions) return;
+                let windows;
+                try { windows = Services.wm.getEnumerator("navigator:browser"); } catch (e) { return; }
+                for (const win of windows) {
+                    if (win.closed) continue;
+                    if (win.document.getElementById(CREATE_COMMAND_ID)) return;
+                }
+                const existing = globalActions.findIndex(a => a.commandId === CREATE_COMMAND_ID);
+                if (existing >= 0) globalActions.splice(existing, 1);
+            } catch (e) { }
+        }
+
+        _uninstallCreateNew() {
+            document.getElementById(CREATE_COMMAND_ID)?.remove();
+            document.getElementById(CREATE_MENUITEM_ID)?.remove();
+            this._onCreateNewCommand = null;
+            this._uninstallOmniboxAction();
         }
 
         /* ------------------------------------------------------------- the tab */
@@ -1548,6 +1669,7 @@
             this._disarmSatellite({ finish: !!elsewhere });
             this._captureResident = null;
             this._unhookGlanceExpand();
+            try { this._uninstallCreateNew(); } catch (e) { }
             window.removeEventListener("unload", this._onUnload);
             if (this._onTabSelect) window.removeEventListener("TabSelect", this._onTabSelect);
             if (this.screenshotHook) {

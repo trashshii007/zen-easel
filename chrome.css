@@ -2,7 +2,8 @@
  *
  * Only what must live outside the easel's own shadow root: the toolbar button, the bundled
  * @font-face rules, the split-view workaround, the send-to-easel menu, the live-card
- * bar, and the Glance expand icon when that button means "go to the easel".
+ * bar, the Glance expand icon when that button means "go to the easel", and the omnibox
+ * action icon (a urlbar <img>, which does not inherit the popup's context-fill).
  *
  * The region-capture overlay's rules used to be here too. They went with the picker they
  * styled — captures now start in Zen's own screenshot overlay, which brings its own. The
@@ -23,6 +24,14 @@
 
 #zen-easel-button:hover .toolbarbutton-icon {
   opacity: 1;
+}
+
+/* The create-new popup already sets context-fill on its menuitems. The omnibox
+   action is an <img class="urlbarView-favicon">, and without this the board
+   SVG's context-fill resolves to nothing — a blank slot next to "New Easel". */
+.urlbarView-favicon[src="chrome://sine/content/zen-easel/resources/zen-easel-board.svg"] {
+  -moz-context-properties: fill, fill-opacity;
+  fill: currentColor;
 }
 
 /* Glance's own rule is `list-style-image: url(fullscreen.svg) !important` on
