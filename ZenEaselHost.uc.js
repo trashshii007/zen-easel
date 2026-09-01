@@ -7,7 +7,8 @@
 //
 // The easel itself is a document now — about:easel, in its own tab. What stays behind in
 // browser.xhtml is only what genuinely cannot live in a page: taking a snapshot of
-// whatever tab you are looking at, hooking Zen's own screenshot UI, and the toolbar button.
+// whatever tab you are looking at, hooking Zen's own screenshot UI, the toolbar button,
+// and the "New Easel" entries on Zen's create-new menu and omnibox.
 //
 // Everything this exposes to the page goes through gZenEaselHost, and every value that
 // crosses is a plain string, number or byte array. The page holds a reference to this
@@ -55,6 +56,12 @@
     // feature degrades to an uglier address bar rather than to nothing.
     const ABOUT_URL = "about:easel";
     const CHROME_URL = BASE + "page/easel.xhtml";
+    // One glyph for the easel tab, the create-new menu row and the omnibox action. It
+    // strokes itself with context-fill, and all three surfaces set that for free — see
+    // the file's own header for why that is the property it uses rather than stroke.
+    const BOARD_ICON = BASE + "resources/zen-easel-board.svg";
+    const CREATE_COMMAND_ID = "cmd_zenEaselNew";
+    const CREATE_MENUITEM_ID = "zen-easel-create-new";
 
     function easelPageUrl(easelId, { glance = false } = {}) {
         let base;
@@ -120,6 +127,12 @@
                 // the overlay out from under a split.
                 this._hookGlanceExpand();
 
+                // Sidebar + menu and the omnibox "Actions" list. Same command as
+                // Create Folder / New Split: a XUL <command> the menuitem and the
+                // urlbar both fire. The popup is in the window from the start, unlike
+                // CustomizableUI, so this does not wait.
+                this._installCreateNew();
+
                 // CustomizableUI is not ready at script-load time on a cold start.
                 this._buttonTimer = setTimeout(() => this._createToolbarButton(), 2000);
                 log("host ready");
@@ -151,6 +164,140 @@
                 // after the first, not an error worth surfacing.
                 log("widget not created:", e.message);
             }
+        }
+
+        /* ------------------------------------------ create-new menu and omnibox */
+
+        // One <command> in this window. The sidebar + menu points at it, and so does
+        // the omnibox action: Zen's urlbar provider does getElementById(command).doCommand()
+        // on a string id, which is why Create Folder and New Split share their commands
+        // across both surfaces. A click listener plus a separate function action would
+        // work, but it would be two wirings for the same thing.
+        _installCreateNew() {
+            // Sine re-runs this script; destroy() should have taken the previous nodes
+            // with it, but a failed teardown would otherwise leave a second row.
+            document.getElementById(CREATE_COMMAND_ID)?.remove();
+            document.getElementById(CREATE_MENUITEM_ID)?.remove();
+
+            const commands = document.getElementById("zenCommandSet");
+            if (!commands) {
+                log("zenCommandSet not found; skipping create-new command");
+                return;
+            }
+
+            // No stored reference to the handler: the listener goes away with the node
+            // it is on, and nothing else ever needs to reach it.
+            const command = document.createXULElement("command");
+            command.id = CREATE_COMMAND_ID;
+            command.addEventListener("command", () => {
+                this.createEasel().catch(e => {
+                    console.error("[zen-easel] could not create easel:", e);
+                    this.toast("Could not create an easel");
+                });
+            });
+            commands.appendChild(command);
+
+            const popup = document.getElementById("zenCreateNewPopup");
+            if (popup) {
+                // No menuitem-iconic: every sibling in this popup carries a bare
+                // image attribute, and zen-icons/icons.css colours the row's icon
+                // through `#zenCreateNewPopup > menuitem img`. Matching them keeps
+                // this row on the same metrics as the four it sits with.
+                const item = document.createXULElement("menuitem");
+                item.id = CREATE_MENUITEM_ID;
+                item.setAttribute("label", "New Easel");
+                item.setAttribute("image", BOARD_ICON);
+                item.setAttribute("command", CREATE_COMMAND_ID);
+                // Above New Split, in the same group as Split / Tab. insertBefore with
+                // a missing sibling is appendChild, so a Zen layout change still lands
+                // the row in the menu rather than throwing.
+                const split = popup.querySelector('[command="cmd_zenNewEmptySplit"]');
+                popup.insertBefore(item, split);
+            } else {
+                log("zenCreateNewPopup not found; omnibox action still registered");
+            }
+
+            this._installOmniboxAction();
+        }
+
+        // globalActions is a process-wide module singleton, and this is the one place in
+        // the mod outside background/registry.sys.mjs that writes to process-wide state
+        // from a per-window script. That is only safe because of how the entry is torn
+        // down: an action object made here closes over this script's scope, whose global
+        // is this window, so an entry left behind by a closed window would pin that whole
+        // window in an array that lives as long as the process. _uninstallOmniboxAction
+        // therefore always splices, and hands the entry to a window that is still open.
+        _globalActions() {
+            const { globalActions } = ChromeUtils.importESModule(
+                "resource:///modules/ZenUBGlobalActions.sys.mjs"
+            );
+            return Array.isArray(globalActions) ? globalActions : null;
+        }
+
+        _installOmniboxAction() {
+            try {
+                const globalActions = this._globalActions();
+                if (!globalActions) return;
+
+                const action = {
+                    label: "New Easel",
+                    icon: BOARD_ICON,
+                    command: CREATE_COMMAND_ID,
+                    commandId: CREATE_COMMAND_ID,
+                    extraPayload: {},
+                    isAvailable: win => {
+                        const cmd = win?.document?.getElementById(CREATE_COMMAND_ID);
+                        return !!cmd && cmd.getAttribute("disabled") !== "true";
+                    }
+                };
+                const existing = globalActions.findIndex(a => a.commandId === CREATE_COMMAND_ID);
+                if (existing >= 0) globalActions.splice(existing, 1, action);
+                else globalActions.push(action);
+            } catch (e) {
+                log("omnibox action not registered:", e.message);
+            }
+        }
+
+        // Unconditional, because the entry belongs to *this* window even though the array
+        // does not. Leaving it in place because some other window still has the command
+        // node — which is what a "is anyone else using this?" guard would do — keeps this
+        // window's scope reachable forever. Splitting it in two instead: drop ours, then
+        // let a window that is still open put its own back, so the row survives without
+        // any closed window's scope surviving with it.
+        _uninstallOmniboxAction() {
+            let globalActions;
+            try {
+                globalActions = this._globalActions();
+            } catch (e) {
+                log("omnibox action not removed:", e.message);
+                return;
+            }
+            if (!globalActions) return;
+
+            const existing = globalActions.findIndex(a => a.commandId === CREATE_COMMAND_ID);
+            if (existing >= 0) globalActions.splice(existing, 1);
+
+            // On the window-closing path this window is usually still in the enumerator —
+            // the mediator drops it after unload — so it is skipped by identity rather
+            // than by win.closed, which is still false at this point.
+            let windows;
+            try { windows = Services.wm.getEnumerator("navigator:browser"); } catch (e) { return; }
+            for (const win of windows) {
+                if (win === window || win.closed) continue;
+                try {
+                    if (!win.document.getElementById(CREATE_COMMAND_ID)) continue;
+                    win.gZenEaselHost?._installOmniboxAction();
+                    return;
+                } catch (e) { }
+            }
+        }
+
+        _uninstallCreateNew() {
+            // Before _uninstallOmniboxAction, which reads this node back out of every
+            // window to decide who should own the entry next.
+            document.getElementById(CREATE_COMMAND_ID)?.remove();
+            document.getElementById(CREATE_MENUITEM_ID)?.remove();
+            this._uninstallOmniboxAction();
         }
 
         /* ------------------------------------------------------------- the tab */
@@ -856,7 +1003,7 @@
             // Both routes point at the one icon file, which strokes itself with
             // context-fill for the reason set out in its own header.
             try {
-                gBrowser.setIcon(tab, BASE + "resources/zen-easel-board.svg");
+                gBrowser.setIcon(tab, BOARD_ICON);
             } catch (e) { }
 
             return tab;
@@ -1548,6 +1695,7 @@
             this._disarmSatellite({ finish: !!elsewhere });
             this._captureResident = null;
             this._unhookGlanceExpand();
+            try { this._uninstallCreateNew(); } catch (e) { }
             window.removeEventListener("unload", this._onUnload);
             if (this._onTabSelect) window.removeEventListener("TabSelect", this._onTabSelect);
             if (this.screenshotHook) {

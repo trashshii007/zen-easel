@@ -4,6 +4,12 @@
  * @font-face rules, the split-view workaround, the send-to-easel menu, the live-card
  * bar, and the Glance expand icon when that button means "go to the easel".
  *
+ * The "New Easel" rows on the create-new menu and in the omnibox need nothing here.
+ * Zen colours the first through `#zenCreateNewPopup > menuitem img`, and the urlbar
+ * view sets `-moz-context-properties: fill, fill-opacity` on .urlbarView-favicon and
+ * inherits `fill: currentColor` into it from .urlbarView-row — which is the whole of
+ * why every other action's line icon in that list paints in both themes.
+ *
  * The region-capture overlay's rules used to be here too. They went with the picker they
  * styled — captures now start in Zen's own screenshot overlay, which brings its own. The
  * "send to easel" menu is a XUL menupopup and gets everything else from Zen's menu theming;
