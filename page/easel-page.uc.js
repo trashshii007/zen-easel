@@ -480,9 +480,9 @@
             }
         }
 
-        toast(message) {
+        toast(message, options) {
             const bridge = this.bridge;
-            if (bridge) bridge.toast(message);
+            if (bridge) bridge.toast(message, options);
             else console.error("[zen-easel]", message);
         }
 

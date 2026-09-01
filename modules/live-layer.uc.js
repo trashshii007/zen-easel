@@ -813,7 +813,7 @@
                 JSON.stringify(measured.scroll), "asset", asset);
 
             this.host.canvas.invalidate();
-            this.host.toast("Card refreshed");
+            this.host.toast("Card refreshed", { dismissAfter: 1000 });
             return true;
         }
 

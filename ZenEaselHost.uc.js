@@ -1671,16 +1671,41 @@
             }
         }
 
-        toast(message) {
+        // dismissAfter is for the toasts that only confirm something worked: the box keeps a
+        // notification up until something closes it, so those have to retire themselves.
+        toast(message, { dismissAfter = 0 } = {}) {
             try {
                 const box = gBrowser.getNotificationBox();
-                box.appendNotification("zen-easel-toast", {
+                const appended = box.appendNotification("zen-easel-toast", {
                     label: `Zen Easel: ${message}`,
                     priority: box.PRIORITY_INFO_MEDIUM
                 }, []);
+                if (!dismissAfter) return;
+                // Sync element on current Firefox, a promise on older ones.
+                Promise.resolve(appended).then(notification => {
+                    if (notification) this._retireToast(box, notification, dismissAfter);
+                }, () => { });
             } catch (e) {
                 console.error("[zen-easel]", message, e);
             }
+        }
+
+        // The fade is spent out of dismissAfter rather than added to it, so a toast asked to
+        // go in a second is gone in a second. Inline styles rather than the mod stylesheet:
+        // this notification lives in the chrome window, not in the easel.
+        _retireToast(box, notification, dismissAfter) {
+            const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+            const fade = reduced ? 0 : Math.min(250, dismissAfter);
+            // Throws once the user has closed it by hand, which is the same outcome.
+            const drop = () => { try { box.removeNotification(notification, true); } catch (e) { } };
+            if (!fade) return void window.setTimeout(drop, dismissAfter);
+            window.setTimeout(() => {
+                try {
+                    notification.style.transition = `opacity ${fade}ms ease-out`;
+                    notification.style.opacity = "0";
+                } catch (e) { }
+                window.setTimeout(drop, fade);
+            }, dismissAfter - fade);
         }
 
         // widget:false is the window-closing path. The toolbar button is registered once
