@@ -132,6 +132,11 @@
                 // CustomizableUI, so this does not wait.
                 this._installCreateNew();
 
+                // The provider is process-global, but Sine's background module often
+                // loads after browser-delayed-startup-finished, so the registry's first
+                // attempt can miss. The host runs in an already-up window.
+                this._installUrlbarProvider();
+
                 // CustomizableUI is not ready at script-load time on a cold start.
                 this._buttonTimer = setTimeout(() => this._createToolbarButton(), 2000);
                 log("host ready");
@@ -162,6 +167,16 @@
                 // Already registered by another window — the normal case for every window
                 // after the first, not an error worth surfacing.
                 log("widget not created:", e.message);
+            }
+        }
+
+        _installUrlbarProvider() {
+            try {
+                const { installUrlbarProvider } =
+                    ChromeUtils.importESModule(BASE + "background/urlbar.sys.mjs");
+                installUrlbarProvider();
+            } catch (e) {
+                console.error("[zen-easel] urlbar provider:", e);
             }
         }
 
@@ -845,6 +860,7 @@
             const tab = gBrowser.selectedTab;
             if (this._staleEaselTabs?.has(tab)) {
                 this._reloadResident({ win: window, tab });
+                this._recordEaselVisit(tab);
                 return;
             }
             // Nothing marked this tab, which does not mean nothing has written its board:
@@ -853,6 +869,22 @@
             // every tab switch costs a lookup.
             this._pageFor(tab)?.refreshIfStale?.()
                 ?.catch(e => console.error("[zen-easel] could not refresh the easel:", e));
+            this._recordEaselVisit(tab);
+        }
+
+        // lastOpened is already written when a board is opened from the page. Switching
+        // back to a tab that is already showing one does not open() again, so the visit
+        // stamp for urlbar recency lives here.
+        _recordEaselVisit(tab) {
+            const id = this._easelIdForTab(tab);
+            if (!id) return;
+            try {
+                const { EaselStore } =
+                    ChromeUtils.importESModule(BASE + "background/store.sys.mjs");
+                EaselStore.setLastOpened(id).catch(e => {
+                    console.error("[zen-easel] could not record easel visit:", e);
+                });
+            } catch (e) { }
         }
 
         // The original is asked to re-read its own file — the page owns hydration, the blob

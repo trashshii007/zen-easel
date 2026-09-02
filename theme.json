@@ -29,7 +29,7 @@
   "scripts": {
     "background/registry.sys.mjs": {
       "name": "Zen Easel registry",
-      "description": "Registers about:easel and the two window actors. Imported once per process."
+      "description": "Registers about:easel, the window actors, and the urlbar provider. Imported once per process."
     },
     "ZenEaselHost.uc.js": {
       "name": "Zen Easel host",

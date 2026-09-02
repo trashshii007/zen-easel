@@ -3,7 +3,7 @@
 // Everything lives as plain files inside the Zen profile. No Firebase, no network,
 // nothing that leaves the machine:
 //
-//   <root>/index.json             { easels: [{ id, title, createdAt, updatedAt }], lastOpened }
+//   <root>/index.json             { easels: [{ id, title, createdAt, updatedAt, lastOpenedAt }], lastOpened }
 //   <root>/easels/<id>.json       one document: objects + saved viewport
 //   <root>/easels/<id>.thumb.png  card thumbnail for the library
 //   <root>/assets/<id>/<uuid>.png captures and dropped images
@@ -194,6 +194,7 @@ class EaselStoreImpl {
                 title: typeof e.title === "string" ? e.title : "Untitled Easel",
                 createdAt: e.createdAt || 0,
                 updatedAt: e.updatedAt || 0,
+                lastOpenedAt: e.lastOpenedAt || 0,
                 objectCount: typeof e.objectCount === "number" ? e.objectCount : 0
             }))
             .sort((a, b) => b.updatedAt - a.updatedAt);
@@ -207,8 +208,19 @@ class EaselStoreImpl {
     async setLastOpened(id) {
         await this.init();
         if (!isSafeId(id)) return;
-        if (this._index.lastOpened === id) return;
+        const entry = this._index.easels.find(e => e.id === id);
+        // Recency among boards only changes when lastOpened changes (A → B).
+        // Re-selecting A after a web tab, or TabSelect after openEasel, must not
+        // rewrite index.json. Stamp lastOpenedAt once on old entries that lack it.
+        if (this._index.lastOpened === id) {
+            if (entry && !entry.lastOpenedAt) {
+                entry.lastOpenedAt = Date.now();
+                await this._writeIndex();
+            }
+            return;
+        }
         this._index.lastOpened = id;
+        if (entry) entry.lastOpenedAt = Date.now();
         await this._writeIndex();
     }
 
@@ -262,7 +274,7 @@ class EaselStoreImpl {
         await this.init();
         const now = Date.now();
         const id = uuid();
-        const entry = { id, title, createdAt: now, updatedAt: now, objectCount: 0 };
+        const entry = { id, title, createdAt: now, updatedAt: now, lastOpenedAt: now, objectCount: 0 };
 
         const body = {
             version: INDEX_VERSION,
