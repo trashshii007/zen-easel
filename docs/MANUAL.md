@@ -974,9 +974,10 @@ window still open.
 
 | | |
 |---|---|
-| `background/registry.sys.mjs` | registers `about:easel`, and installs the actors at boot |
+| `background/registry.sys.mjs` | registers `about:easel` and the urlbar provider, and installs the actors at boot |
 | `background/actors.sys.mjs` | what the three window actors are, and how to install them |
 | `background/store.sys.mjs` | owns the disk: index, write queue, shutdown blocker, asset sweep |
+| `background/urlbar.sys.mjs` | the address-bar provider that suggests boards by title, or by the `easel` keyword |
 | `background/validate.sys.mjs` | the URL/id/asset-name rules, shared by everything |
 | `background/capture-backdrop.sys.mjs` | hooks `ScreenshotsUtils.createCanvas` so Zen's own screenshots composite onto the window's colour instead of white |
 

@@ -869,6 +869,7 @@
 
         _onTabSelect() {
             const tab = gBrowser.selectedTab;
+            this._recordEaselVisit(tab);
             if (this._staleEaselTabs?.has(tab)) {
                 this._reloadResident({ win: window, tab });
                 return;
@@ -879,6 +880,29 @@
             // every tab switch costs a lookup.
             this._pageFor(tab)?.refreshIfStale?.()
                 ?.catch(e => console.error("[zen-easel] could not refresh the easel:", e));
+        }
+
+        // lastOpened is already written when a board is opened from the page. Switching
+        // back to a tab that is already showing one does not open() again, so the visit
+        // stamp for urlbar recency lives here.
+        //
+        // _matchEaselTab first, and that guard is the whole safety of this: _easelIdForTab
+        // reads ?easel= off whatever URL the tab is at, so without it any web page visited
+        // at https://example.com/?easel=<id> would rewrite lastOpened on every tab switch
+        // to it. It also keeps an ordinary switch between web tabs from parsing a URL.
+        _recordEaselVisit(tab) {
+            if (!this._matchEaselTab(tab)) return;
+            const id = this._easelIdForTab(tab);
+            if (!id) return;
+            try {
+                const { EaselStore } =
+                    ChromeUtils.importESModule(BASE + "background/store.sys.mjs");
+                EaselStore.setLastOpened(id).catch(e => {
+                    console.error("[zen-easel] could not record easel visit:", e);
+                });
+            } catch (e) {
+                console.error("[zen-easel] could not record easel visit:", e);
+            }
         }
 
         // The original is asked to re-read its own file — the page owns hydration, the blob

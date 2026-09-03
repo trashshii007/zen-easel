@@ -142,3 +142,16 @@ try {
     // in the mod depends on these.
     console.error("[zen-easel] actor registration failed:", e);
 }
+
+try {
+    const { installUrlbarProvider } = ChromeUtils.importESModule(
+        "chrome://sine/content/zen-easel/background/urlbar.sys.mjs"
+    );
+    installUrlbarProvider();
+} catch (e) {
+    // Imported here rather than at module top-level: a failed import would otherwise
+    // take about:easel and the actors down with it. The provider is process-global, so
+    // this one call covers every window; a throw is a real Zen API change and nothing
+    // else in the mod depends on it.
+    console.error("[zen-easel] urlbar provider registration failed:", e);
+}

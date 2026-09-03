@@ -3,7 +3,7 @@
 // Everything lives as plain files inside the Zen profile. No Firebase, no network,
 // nothing that leaves the machine:
 //
-//   <root>/index.json             { easels: [{ id, title, createdAt, updatedAt }], lastOpened }
+//   <root>/index.json             { easels: [{ id, title, createdAt, updatedAt, lastOpenedAt }], lastOpened }
 //   <root>/easels/<id>.json       one document: objects + saved viewport
 //   <root>/easels/<id>.thumb.png  card thumbnail for the library
 //   <root>/assets/<id>/<uuid>.png captures and dropped images
@@ -194,6 +194,7 @@ class EaselStoreImpl {
                 title: typeof e.title === "string" ? e.title : "Untitled Easel",
                 createdAt: e.createdAt || 0,
                 updatedAt: e.updatedAt || 0,
+                lastOpenedAt: e.lastOpenedAt || 0,
                 objectCount: typeof e.objectCount === "number" ? e.objectCount : 0
             }))
             .sort((a, b) => b.updatedAt - a.updatedAt);
@@ -204,15 +205,42 @@ class EaselStoreImpl {
         return this._index.lastOpened;
     }
 
+    // Called on every switch to an easel tab, not just on open, so the cheap paths matter:
+    // an id we do not have an entry for is not "the last easel opened" — pointing
+    // lastOpened at it would only send the next openLast() at a file that is not there —
+    // and re-selecting the board that is already lastOpened writes nothing.
     async setLastOpened(id) {
         await this.init();
         if (!isSafeId(id)) return;
-        if (this._index.lastOpened === id) return;
+        const entry = this._index.easels.find(e => e.id === id);
+        if (!entry) return;
+        // Recency among boards only changes when lastOpened changes (A → B). Stamp
+        // lastOpenedAt once on an older entry that predates the field, so a profile
+        // upgraded into this version does not sort every board as never-opened.
+        if (this._index.lastOpened === id) {
+            if (!entry.lastOpenedAt) {
+                entry.lastOpenedAt = Date.now();
+                await this._writeIndex();
+            }
+            return;
+        }
         this._index.lastOpened = id;
+        entry.lastOpenedAt = Date.now();
         await this._writeIndex();
     }
 
-    async _writeIndex() {
+    // Through the same promise chain the document writes use, for the reason _drain
+    // gives: two overlapping writeJSON calls to index.json race on index.json.tmp and can
+    // leave the real file missing. Every caller outside _drain comes in here — setLastOpened
+    // now fires on tab switches, so landing one on top of an in-flight autosave is not the
+    // theoretical case it was when only open() called it.
+    _writeIndex() {
+        const run = () => this._writeIndexNow();
+        this._writing = this._writing.then(run, run);
+        return this._writing;
+    }
+
+    async _writeIndexNow() {
         const path = this._indexPath();
         await IOUtils.writeJSON(path, this._index, { tmpPath: `${path}.tmp` });
     }
@@ -262,7 +290,7 @@ class EaselStoreImpl {
         await this.init();
         const now = Date.now();
         const id = uuid();
-        const entry = { id, title, createdAt: now, updatedAt: now, objectCount: 0 };
+        const entry = { id, title, createdAt: now, updatedAt: now, lastOpenedAt: now, objectCount: 0 };
 
         const body = {
             version: INDEX_VERSION,
@@ -377,7 +405,9 @@ class EaselStoreImpl {
                 }
             }
             try {
-                if (this._index) await this._writeIndex();
+                // _writeIndexNow, not _writeIndex: this already *is* the write chain, and
+                // going through the wrapper would make run() await the promise it is.
+                if (this._index) await this._writeIndexNow();
             } catch (e) {
                 console.error("[zen-easel] could not write index:", e);
             }
