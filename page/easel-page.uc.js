@@ -666,8 +666,13 @@
         // pagehide is the only guaranteed notification a tab gets, and it cannot await.
         // Handing the serialised document to the background queue is synchronous, and
         // that queue's shutdown blocker owns the guarantee from there.
-        _onPageHide() {
-            try { this.element?.store?.handOffForUnload(); } catch (e) { console.error(e); }
+        _onPageHide(event) {
+            // persisted says this document is only being put away, not ended — the store
+            // keeps an untouched board rather than discarding it, because _onPageShow can
+            // hand the same page back still showing it.
+            try {
+                this.element?.store?.handOffForUnload({ persisted: !!event?.persisted });
+            } catch (e) { console.error(e); }
             // The one thing that does have to be a teardown. _armGlanceSync is the only
             // part of this page that hangs listeners on the *chrome* document — a
             // GlanceOpen listener on our tab and a MutationObserver on its container —

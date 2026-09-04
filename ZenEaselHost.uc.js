@@ -565,6 +565,16 @@
             }
         }
 
+        // Anyone but `exclude` still showing this board — glance views included. Synchronous: pagehide asks.
+        hasOtherViewOf(easelId, exclude = null) {
+            if (!easelId) return false;
+            // "Could not look" must not read as "nobody there", and _eachEaselView swallows that.
+            try { Services.wm.getEnumerator("navigator:browser"); } catch (e) { return true; }
+            let found = false;
+            this._eachEaselView(easelId, exclude, () => { found = true; });
+            return found;
+        }
+
         // The satellite is about to become this board's writer, so no other copy of it may
         // reach disk until the satellite has finished and they have re-read the file.
         _freezeViews(easelId, exclude) {

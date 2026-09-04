@@ -22,6 +22,10 @@
 
     const DOC_VERSION = 1;
 
+    // The name every easel is created with, matching createDocument's default and the
+    // canvas's DEFAULT_TITLE. A board still carrying it is one nobody has named.
+    const DEFAULT_TITLE = "Untitled Easel";
+
     // Asset names are constrained to these five extensions by validate.sys.mjs, so the
     // map is total over what can actually be on disk and the fallback is unreachable
     // rather than a guess.
@@ -73,6 +77,10 @@
             // A glance satellite is writing this board; this page's copy is stale and
             // must not reach disk. See freezeWrites / reloadFromDisk.
             this._frozen = false;
+
+            // What the open board looked like when it was created, or null once it holds
+            // anything of its own. See isPristine.
+            this._pristine = null;
         }
 
         async init() {
@@ -112,7 +120,7 @@
         }
 
         async open(id) {
-            await this.flush();
+            await this._letGoOfDocument();
             this._releaseAssets();
 
             const json = await EaselStore.readDocument(id);
@@ -162,7 +170,17 @@
             // Colours are hex now. A board written before that stores keys, and this is which of Arc's two palettes they meant —
             // defaulted rather than passed raw, or a file with no palette field at all would resolve every key to black.
             const legacyPalette = raw.palette === "chill" ? "chill" : "vibrant";
-            return {
+
+            // A file holding nothing at all is a board that was created and never written
+            // to: no objects, no heading yet, and still called what it was created as.
+            // Read from raw rather than from the document below because the canvas adds a
+            // heading the moment it opens one of these — by the time anything asks, the
+            // board is no longer literally empty. See isPristine.
+            const bornEmpty = (!Array.isArray(raw.objects) || raw.objects.length === 0)
+                && raw.titleObjectId === undefined
+                && raw.title === DEFAULT_TITLE;
+
+            const doc = {
                 id,
                 // Read by markDirty() and _handOff(). Absent on every normal document.
                 readOnly: truncated,
@@ -206,6 +224,15 @@
                         .map(o => Objects.sanitize(o, legacyPalette)).filter(Boolean)
                     : []
             };
+
+            // Snapshotted rather than compared against the defaults so the check cannot
+            // drift if those ever change: what counts as untouched is what this board
+            // arrived as, not what a board created today would arrive as.
+            this._pristine = bornEmpty
+                ? { background: doc.background, canvasMode: doc.canvasMode }
+                : null;
+
+            return doc;
         }
 
         _sanitizeViewport(v) {
@@ -214,8 +241,8 @@
             return { panX: v.panX, panY: v.panY, zoom: Math.min(4, Math.max(0.1, v.zoom)) };
         }
 
-        async create(title = "Untitled Easel") {
-            await this.flush();
+        async create(title = DEFAULT_TITLE) {
+            await this._letGoOfDocument();
             this._releaseAssets();
 
             const { entry, json } = await EaselStore.createDocument(title);
@@ -247,6 +274,74 @@
 
         /* --------------------------------------------------------------- saving */
 
+        // A board that was created and never used. Every easel exists on disk from the
+        // moment its id does — createDocument writes the file and the index entry before
+        // any page sees it — so opening one and closing the tab used to leave an
+        // "Untitled Easel" behind in the library that nobody asked for.
+        //
+        // The heading does not count against it. The canvas gives every new board one
+        // (see _ensureTitleHeading), so a board with nothing on it is not empty by the
+        // time this is asked: it holds exactly the heading, still reading the name the
+        // easel was created with. A named board is never pristine — typing a name into
+        // "New easel" is already an act worth keeping — and neither is one whose
+        // background or page mode was changed.
+        isPristine() {
+            const doc = this._doc;
+            const born = this._pristine;
+            if (!doc || !born) return false;
+            if (doc.title !== DEFAULT_TITLE) return false;
+            if (doc.background !== born.background || doc.canvasMode !== born.canvasMode) return false;
+            if (doc.objects.length === 0) return true;
+            if (doc.objects.length > 1) return false;
+
+            const [only] = doc.objects;
+            return only.id === doc.titleObjectId && only.type === "text"
+                && only.text.content === DEFAULT_TITLE;
+        }
+
+        // Takes an untouched board back off disk. Returns the delete so a caller that can
+        // wait may, or null when there is nothing to take back.
+        //
+        // The document is dropped here rather than left in place: markDirty and _handOff
+        // both refuse without one, so a stray save arriving after the delete cannot write
+        // the file back with no index entry pointing at it.
+        _discardIfPristine() {
+            // Frozen means this copy is stale, and another view means it is not ours to delete.
+            if (this._frozen) return null;
+            if (!this.isPristine()) return null;
+            if (this._hasOtherView()) return null;
+            const id = this._doc.id;
+            this._cancelPendingSave();
+            this._pristine = null;
+            this._doc = null;
+            return EaselStore.removeEasel(id).catch(
+                e => console.error(`[zen-easel] could not discard the empty easel ${id}:`, e));
+        }
+
+        // Synchronous because pagehide asks; unreachable answers "yes", since it only gates a delete.
+        _hasOtherView() {
+            const id = this._doc?.id;
+            if (!id) return false;
+            try {
+                const bridge = this.host?.bridge;
+                if (!bridge || typeof bridge.hasOtherViewOf !== "function") return true;
+                return bridge.hasOtherViewOf(id, window.browsingContext?.embedderElement ?? null);
+            } catch (e) {
+                return true;
+            }
+        }
+
+        // This page is finished with the board it holds: either its work goes to disk, or
+        // — if nothing was ever put on it — the board itself goes away.
+        async _letGoOfDocument() {
+            const discarded = this._discardIfPristine();
+            if (discarded) {
+                await discarded;
+                return;
+            }
+            await this.flush();
+        }
+
         // Another view of this board — a glance satellite — has taken over as its writer.
         // The page stays loaded, as a pinned tab usually does, but everything that reaches
         // disk is gated on this until reloadFromDisk lifts it.
@@ -273,6 +368,13 @@
             const json = await EaselStore.readDocument(id);
             if (!json) {
                 await this.refreshList();
+                // Off the index means deleted, not unreadable: thaw, or the tab can never save again.
+                if (!this._easels.some(e => e.id === id)) {
+                    this._releaseAssets();
+                    this._doc = null;
+                    this._pristine = null;
+                    this._frozen = false;
+                }
                 return null;
             }
 
@@ -335,7 +437,8 @@
                 this._frozen = wasFrozen;
                 throw e;
             }
-            if (!doc) this._frozen = wasFrozen;
+            // Not when the board went away: reloadFromDisk thawed deliberately there.
+            if (!doc && this._doc) this._frozen = wasFrozen;
             return doc;
         }
 
@@ -369,6 +472,11 @@
             // The backstop for readOnly. markDirty() already declines to schedule a save,
             // but flush() and handOffForUnload() call this directly.
             if (this._frozen || !this._doc || this._doc.readOnly) return;
+            // An untouched board is left exactly as it was created. Writing the heading
+            // out would be harmless in itself, but it is what the file is read back
+            // against: save it once and reopening the board finds objects on disk and
+            // stops seeing it as one nobody has used. See isPristine.
+            if (this.isPristine()) return;
             const doc = this._doc;
             EaselStore.queueSave(doc.id, JSON.stringify({
                 version: DOC_VERSION,
@@ -450,9 +558,13 @@
         // The tab is going away and there is no time to await anything. Handing the
         // document to the background queue is enough: its shutdown blocker owns the
         // guarantee from here, whether the browser is quitting or just closing a tab.
-        handOffForUnload() {
+        handOffForUnload({ persisted = false } = {}) {
             this._cancelPendingSave();
             if (this._frozen) return;
+            // A board nobody put anything on does not outlive its tab. Not on a persisted
+            // hide: that page is only being put away and comes back out of the session
+            // history still showing this board, so there is nothing to be finished with.
+            if (!persisted && this._discardIfPristine()) return;
             this._handOff();
         }
 

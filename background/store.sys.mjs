@@ -75,6 +75,9 @@ class EaselStoreImpl {
         this._saveTimer = null;
         this._writing = Promise.resolve();
         this._blockerAdded = false;
+
+        // Deletes in flight; flush() waits on these the way it drains _pending.
+        this._deletes = new Set();
     }
 
     /* ---------------------------------------------------------------- paths */
@@ -335,7 +338,16 @@ class EaselStoreImpl {
         await this._writeIndex();
     }
 
-    async removeEasel(id) {
+    // Tracked so the shutdown blocker waits for it: a pagehide delete during quit races profileBeforeChange.
+    removeEasel(id) {
+        const done = this._removeEasel(id);
+        this._deletes.add(done);
+        const forget = () => this._deletes.delete(done);
+        done.then(forget, forget);
+        return done;
+    }
+
+    async _removeEasel(id) {
         await this.init();
         if (!isSafeId(id)) return;
 
@@ -346,6 +358,9 @@ class EaselStoreImpl {
         this._index.easels = this._index.easels.filter(e => e.id !== id);
         if (this._index.lastOpened === id) this._index.lastOpened = null;
 
+        // Index first: interrupted, that leaves an unreferenced file rather than a card opening onto nothing.
+        await this._writeIndex();
+
         for (const remove of [
             () => IOUtils.remove(this._easelPath(id), { ignoreAbsent: true }),
             () => IOUtils.remove(this._thumbPath(id), { ignoreAbsent: true }),
@@ -353,8 +368,6 @@ class EaselStoreImpl {
         ]) {
             try { await remove(); } catch (e) { console.error("[zen-easel] delete:", e); }
         }
-
-        await this._writeIndex();
     }
 
     /* ---------------------------------------------------------------- saving */
@@ -424,6 +437,8 @@ class EaselStoreImpl {
             this._saveTimer = null;
         }
         await this._drain();
+        // allSettled: a failed delete logs where it happens, it must not take the blocker down.
+        if (this._deletes.size) await Promise.allSettled([...this._deletes]);
         return this._writing;
     }
 
