@@ -1172,6 +1172,12 @@
             const glanced = await this._openEaselInGlance(easelId, capture);
             if (glanced) return glanced;
 
+            // A full tab is only for Glance being off or missing. openGlance returning
+            // nothing after a previous overlay close is leftover singleton state — a
+            // second writer on the same board, with the old overlay still sitting on
+            // the screenshot tab. The link path already refuses that; captures used not to.
+            if (this._glanceEnabled() && !this._currentGlanceTab()) return null;
+
             return this.openEasel(easelId);
         }
 
@@ -1179,8 +1185,13 @@
         // to. Glance is the overlay; a full tab with glance=1 is the same satellite
         // as far as claimEasel is concerned, used only when Glance cannot open.
         async _openSatelliteOf(residentHit, easelId, capture) {
-            const tab = (await this._openEaselInGlance(easelId, capture))
-                || this._openLocalSatellite(easelId);
+            let tab = await this._openEaselInGlance(easelId, capture);
+            // Same rule as _openEaselForCapture: a local satellite tab is the fallback
+            // when Glance is off or already showing something else, not when it returned
+            // nothing because its singleton was stale.
+            if (!tab && !(this._glanceEnabled() && !this._currentGlanceTab())) {
+                tab = this._openLocalSatellite(easelId);
+            }
             if (!tab) return null;
             const resident = this._isResidentFor(this._pendingSatelliteResident, easelId)
                 ? this._pendingSatelliteResident : residentHit;
@@ -1248,27 +1259,30 @@
             return this._glanceIsAvailable();
         }
 
+        // Manager present and the user has Glance on. Distinct from _glanceIsAvailable:
+        // that one is also false while an overlay tab is up, which is "busy", not "off".
+        _glanceEnabled() {
+            const mgr = window.gZenGlanceManager;
+            if (!mgr || typeof mgr.openGlance !== "function") return false;
+            try {
+                return Services.prefs.getBoolPref("zen.glance.enabled", true);
+            } catch (e) {
+                return false;
+            }
+        }
+
         // Glance is a chrome singleton with no "is one up?" getter, so the attributes
         // it stamps on its child are the honest test. openGlance itself does not
         // honour zen.glance.enabled — that pref only gates the automatic triggers —
         // so a user who turned Glance off would still get an overlay from us unless
         // we check it here.
+        //
+        // A tab already on its way out still carries zen-glance-tab until removeTab
+        // finishes. Treating that as "Glance is up" made the next capture open a
+        // full tab on top of the closing overlay.
         _glanceIsAvailable() {
-            const mgr = window.gZenGlanceManager;
-            if (!mgr || typeof mgr.openGlance !== "function") return false;
-            try {
-                if (!Services.prefs.getBoolPref("zen.glance.enabled", true)) return false;
-            } catch (e) {
-                return false;
-            }
-            try {
-                for (const tab of this._tabsInWindow()) {
-                    if (tab.hasAttribute("zen-glance-tab")) return false;
-                }
-            } catch (e) {
-                return false;
-            }
-            return true;
+            if (!this._glanceEnabled()) return false;
+            return !this._currentGlanceTab();
         }
 
         // Where the arc grows from, in the tabpanels-relative space openGlance expects —
@@ -1302,6 +1316,24 @@
             return { clientX: ok(clientX), clientY: ok(clientY), width: 0, height: 0 };
         }
 
+        _acceptEaselGlanceTab(tab, easelId) {
+            if (!tab || tab.closing) return false;
+            if (!tab.hasAttribute("zen-glance-tab")) return false;
+            return this._matchEaselTab(tab, easelId);
+        }
+
+        async _callOpenGlanceForEasel(mgr, easelId, capture) {
+            const origin = this._glanceOrigin(capture);
+            this._setLinkClickData(mgr, origin);
+            return mgr.openGlance({
+                url: easelPageUrl(easelId, { glance: true }),
+                // The system principal, as openEasel uses for the same address: this is
+                // the mod's own chrome page, not a URL from a document.
+                triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal(),
+                ...origin
+            });
+        }
+
         async _openEaselInGlance(easelId, capture) {
             // A missing id is openEasel(null) — "whichever board" — and Glance needs a
             // concrete URL. The toolbar already refuses to create a second copy that
@@ -1315,32 +1347,39 @@
                 this._rememberGlanceResident(current, easelId);
                 return current;
             }
-            if (!this._glanceIsAvailable()) return null;
+            if (!this._glanceEnabled()) return null;
 
+            const mgr = window.gZenGlanceManager;
             this._hookGlanceExpand();
             this._pendingGlanceEaselId = easelId;
-            let tab;
+            let tab = null;
             try {
-                const origin = this._glanceOrigin(capture);
-                this._setLinkClickData(window.gZenGlanceManager, origin);
-                tab = await window.gZenGlanceManager.openGlance({
-                    url: easelPageUrl(easelId, { glance: true }),
-                    // The system principal, as openEasel uses for the same address: this is
-                    // the mod's own chrome page, not a URL from a document.
-                    triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal(),
-                    ...origin
-                });
+                // Same repair the link path uses: after an overlay close Glance can still
+                // hold the screenshot tab as parent with no child, and openGlance then
+                // returns null. There is no overlay in the strip, so clearing the id is
+                // safe. Retry once if the first call still is not a glance of this board.
+                this._clearStaleGlance(mgr);
+                tab = await this._callOpenGlanceForEasel(mgr, easelId, capture);
+                if (!this._acceptEaselGlanceTab(tab, easelId) && !this._currentGlanceTab()) {
+                    this._clearStaleGlance(mgr);
+                    tab = await this._callOpenGlanceForEasel(mgr, easelId, capture);
+                }
             } catch (e) {
-                this._pendingGlanceEaselId = null;
                 console.error("[zen-easel] could not open the easel in glance:", e);
-                return this._findEaselTab(easelId);
+                try {
+                    this._clearStaleGlance(mgr);
+                    tab = await this._callOpenGlanceForEasel(mgr, easelId, capture);
+                } catch (retryErr) {
+                    this._pendingGlanceEaselId = null;
+                    console.error("[zen-easel] glance retry failed:", retryErr);
+                    return this._findEaselTab(easelId);
+                }
             }
             this._pendingGlanceEaselId = null;
 
             // openGlance no-ops and returns the current glance when one is already
-            // up. That tab is someone else's, so fall back to a full tab rather than
-            // dropping the capture onto it.
-            if (tab && this._matchEaselTab(tab, easelId)) {
+            // up. That tab is someone else's, so do not drop the capture onto it.
+            if (this._acceptEaselGlanceTab(tab, easelId)) {
                 // Glance builds its tab itself, so openEasel's icon call never runs for one.
                 // Without this the overlay wears the default globe.
                 try { gBrowser.setIcon(tab, BASE + "resources/zen-easel-board.svg"); } catch (e) { }
