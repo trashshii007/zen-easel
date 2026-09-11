@@ -19,8 +19,7 @@ const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
     UrlbarResult: "chrome://browser/content/urlbar/UrlbarResult.mjs",
-    // RESULT_TYPE and RESULT_SOURCE live here; PROVIDER_TYPE and MAX_TEXT_LENGTH are
-    // still on UrlbarUtils. Zen's own ZenUBActionsProvider splits them the same way.
+    // RESULT_TYPE and RESULT_SOURCE live here; PROVIDER_TYPE and MAX_TEXT_LENGTH moved here from UrlbarUtils in Firefox 155, see providerTypes().
     UrlbarShared: "chrome://browser/content/urlbar/UrlbarShared.mjs",
     BrowserWindowTracker: "resource:///modules/BrowserWindowTracker.sys.mjs",
     UrlUtils: "resource://gre/modules/UrlUtils.sys.mjs",
@@ -36,6 +35,15 @@ const MIN_QUERY_LENGTH = 2;
 // Above mid-string noise. Prefix is 100+; a word-boundary token of 3+ chars is 73+.
 const MIN_TITLE_SCORE = 70;
 const KEYWORD_SCORE = 80;
+
+// registerProvider reads `type` up front, so a getter that throws on either build leaves the provider silently absent.
+function providerTypes() {
+    return lazy.UrlbarShared.PROVIDER_TYPE ?? UrlbarUtils.PROVIDER_TYPE;
+}
+
+function maxTextLength() {
+    return lazy.UrlbarShared.MAX_TEXT_LENGTH ?? UrlbarUtils.MAX_TEXT_LENGTH ?? 255;
+}
 
 function scoreTitle(title, query) {
     if (!title || !query) return 0;
@@ -85,7 +93,7 @@ export class ZenUrlbarProviderEasels extends UrlbarProvider {
     }
 
     get type() {
-        return UrlbarUtils.PROVIDER_TYPE.PROFILE;
+        return providerTypes().PROFILE;
     }
 
     getPriority() {
@@ -96,9 +104,7 @@ export class ZenUrlbarProviderEasels extends UrlbarProvider {
         try {
             if (!queryContext.searchString) return false;
             if (queryContext.searchString.length < MIN_QUERY_LENGTH) return false;
-            if (queryContext.searchString.length >= UrlbarUtils.MAX_TEXT_LENGTH) {
-                return false;
-            }
+            if (queryContext.searchString.length >= maxTextLength()) return false;
             if (lazy.UrlUtils?.REGEXP_LIKE_PROTOCOL?.test(queryContext.searchString)) {
                 return false;
             }

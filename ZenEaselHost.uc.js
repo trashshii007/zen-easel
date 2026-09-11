@@ -1172,12 +1172,10 @@
             const glanced = await this._openEaselInGlance(easelId, capture);
             if (glanced) return glanced;
 
-            // A full tab is only for Glance being off or missing. openGlance returning
-            // nothing after a previous overlay close is leftover singleton state — a
-            // second writer on the same board, with the old overlay still sitting on
-            // the screenshot tab. The link path already refuses that; captures used not to.
-            if (this._glanceEnabled() && !this._currentGlanceTab()) return null;
-
+            // Glance off, busy, or still refusing after the repair: a tab places the capture rather than dropping it.
+            if (this._glanceEnabled() && !this._currentGlanceTab()) {
+                console.warn("[zen-easel] glance did not open for the capture; using a tab");
+            }
             return this.openEasel(easelId);
         }
 
@@ -1185,13 +1183,8 @@
         // to. Glance is the overlay; a full tab with glance=1 is the same satellite
         // as far as claimEasel is concerned, used only when Glance cannot open.
         async _openSatelliteOf(residentHit, easelId, capture) {
-            let tab = await this._openEaselInGlance(easelId, capture);
-            // Same rule as _openEaselForCapture: a local satellite tab is the fallback
-            // when Glance is off or already showing something else, not when it returned
-            // nothing because its singleton was stale.
-            if (!tab && !(this._glanceEnabled() && !this._currentGlanceTab())) {
-                tab = this._openLocalSatellite(easelId);
-            }
+            const tab = (await this._openEaselInGlance(easelId, capture))
+                || this._openLocalSatellite(easelId);
             if (!tab) return null;
             const resident = this._isResidentFor(this._pendingSatelliteResident, easelId)
                 ? this._pendingSatelliteResident : residentHit;
@@ -1259,8 +1252,7 @@
             return this._glanceIsAvailable();
         }
 
-        // Manager present and the user has Glance on. Distinct from _glanceIsAvailable:
-        // that one is also false while an overlay tab is up, which is "busy", not "off".
+        // Manager present and the pref on — openGlance ignores zen.glance.enabled, so it is checked here. "Off", as opposed to _glanceIsAvailable's "busy".
         _glanceEnabled() {
             const mgr = window.gZenGlanceManager;
             if (!mgr || typeof mgr.openGlance !== "function") return false;
@@ -1271,18 +1263,9 @@
             }
         }
 
-        // Glance is a chrome singleton with no "is one up?" getter, so the attributes
-        // it stamps on its child are the honest test. openGlance itself does not
-        // honour zen.glance.enabled — that pref only gates the automatic triggers —
-        // so a user who turned Glance off would still get an overlay from us unless
-        // we check it here.
-        //
-        // A tab already on its way out still carries zen-glance-tab until removeTab
-        // finishes. Treating that as "Glance is up" made the next capture open a
-        // full tab on top of the closing overlay.
+        // No "is one up?" getter on the singleton: the attribute it stamps on its child is the test, and a closing tab does not count.
         _glanceIsAvailable() {
-            if (!this._glanceEnabled()) return false;
-            return !this._currentGlanceTab();
+            return this._glanceEnabled() && !this._currentGlanceTab();
         }
 
         // Where the arc grows from, in the tabpanels-relative space openGlance expects —
@@ -1316,6 +1299,7 @@
             return { clientX: ok(clientX), clientY: ok(clientY), width: 0, height: 0 };
         }
 
+        // A live overlay of this board only: a removed tab still matches by URL, so the attribute Glance strips on close is required too.
         _acceptEaselGlanceTab(tab, easelId) {
             if (!tab || tab.closing) return false;
             if (!tab.hasAttribute("zen-glance-tab")) return false;
@@ -1354,10 +1338,7 @@
             this._pendingGlanceEaselId = easelId;
             let tab = null;
             try {
-                // Same repair the link path uses: after an overlay close Glance can still
-                // hold the screenshot tab as parent with no child, and openGlance then
-                // returns null. There is no overlay in the strip, so clearing the id is
-                // safe. Retry once if the first call still is not a glance of this board.
+                // Same repair as the link path: a stale singleton answers with a dead tab, so clear it first and once more if the answer is still not a live glance of this board.
                 this._clearStaleGlance(mgr);
                 tab = await this._callOpenGlanceForEasel(mgr, easelId, capture);
                 if (!this._acceptEaselGlanceTab(tab, easelId) && !this._currentGlanceTab()) {
@@ -1365,15 +1346,9 @@
                     tab = await this._callOpenGlanceForEasel(mgr, easelId, capture);
                 }
             } catch (e) {
+                this._pendingGlanceEaselId = null;
                 console.error("[zen-easel] could not open the easel in glance:", e);
-                try {
-                    this._clearStaleGlance(mgr);
-                    tab = await this._callOpenGlanceForEasel(mgr, easelId, capture);
-                } catch (retryErr) {
-                    this._pendingGlanceEaselId = null;
-                    console.error("[zen-easel] glance retry failed:", retryErr);
-                    return this._findEaselTab(easelId);
-                }
+                return this._findEaselTab(easelId);
             }
             this._pendingGlanceEaselId = null;
 
@@ -1517,11 +1492,8 @@
             };
         }
 
-        // openGlance returns #currentTab immediately when it thinks a glance is
-        // already up. After an easel glance is closed that map can still hold
-        // the easel as parentTab with no child — selectedTab === parent, child
-        // null, so every later openGlance returns null. There is no overlay
-        // tab in the strip, so clearing the id is safe.
+        // openGlance answers with #currentTab while its map holds an entry, even one whose tab is already gone (a close it refused, finished by _removeStrayGlanceTab); nothing is in the strip, so clearing the id is safe.
+        // quickCloseGlance dereferences the entry's parent before clearID, so this throws harmlessly with no entry and cannot repair one whose parent tab has closed.
         _clearStaleGlance(mgr) {
             if (this._currentGlanceTab()) return;
             try {
