@@ -49,10 +49,9 @@
     // ensurePatched() returns immediately once the prototype carries its flag.
     //
     // The retry is the same repair capture-host does around its own actor, and for the same
-    // reason: getActor throws when the registration this process holds predates the actor
-    // definition, which is the normal state of affairs after editing the mod without
-    // restarting. Re-registering goes through actors.sys.mjs — asking the registry would
-    // only reinstall whatever stale copy it is holding.
+    // reason: getActor throws when this process holds no usable registration — the boot
+    // registration failed, or something unregistered it since. Re-registering goes through
+    // actors.sys.mjs so it takes only the definitions, not the registry's boot side effects.
     function prime(browser) {
         const windowGlobal = browser.browsingContext.currentWindowGlobal;
         // Checked rather than left to throw, so a tab caught mid-navigation cannot send the
@@ -104,12 +103,9 @@
                     console.error(`[zen-easel] could not observe ${topic}:`, e);
                 }
             }
-            // Registered from here as well as from registry.sys.mjs at boot, for the reason
-            // set out in actors.sys.mjs: the registry is a background module whose top level
-            // never runs again, so a process that started before this actor existed is
-            // holding a registration that does not include it — and nothing in the registry
-            // can fix that, because the registry is the stale thing. This file is re-run on
-            // every window and every reload, so it can.
+            // Registered from here as well as from registry.sys.mjs at boot: the registry's
+            // top level runs once per process and swallows a failed registration, so this —
+            // re-run on every window and every reload — is the retry. See actors.sys.mjs.
             try {
                 const { ensureActor } = ChromeUtils.importESModule(BASE + "background/actors.sys.mjs");
                 ensureActor("ZenEaselScreenshot");

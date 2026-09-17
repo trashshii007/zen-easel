@@ -106,11 +106,12 @@ export function unregister() {
 
 /* ---------------------------------------------------------------- actors */
 
-// The definitions moved to actors.sys.mjs, and the move is load-bearing: a window script
-// has to be able to install them over a stale registration, and it cannot do that through
-// this module, because this module is exactly the thing that goes stale. See the header
-// there. Everything here is now a thin pass-through so there is still one place that
-// registers actors at boot.
+// The definitions live in actors.sys.mjs so a window script can install one without
+// importing this module and its boot side effects: screenshot-hook.uc.js and
+// capture-host.uc.js do that to retry an actor the boot below failed to register. This
+// import shares the same cached copy, so an edit there needs a restart just like one here
+// — see the header there. Everything below is a thin pass-through so there is still one
+// place that registers actors at boot.
 const { ensureActor, ensureActors, removeActors } =
     ChromeUtils.importESModule("chrome://sine/content/zen-easel/background/actors.sys.mjs");
 
@@ -137,9 +138,9 @@ try {
 try {
     registerActors();
 } catch (e) {
-    // Already registered by a previous copy of this module in the same process, or a
-    // Zen update changed the actor API. Live cards degrade to screenshots; nothing else
-    // in the mod depends on these.
+    // ensureActor already unregisters first and catches per actor, so this is only the
+    // backstop for a Zen update changing the actor API. Live cards degrade to screenshots;
+    // nothing else in the mod depends on these.
     console.error("[zen-easel] actor registration failed:", e);
 }
 

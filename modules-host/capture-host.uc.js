@@ -293,17 +293,14 @@
 
         // The measurement round trip, with one repair attempt behind it.
         //
-        // getActor throws when the registration this process is holding does not match the
-        // window being asked. Registration happens once per process, from a background
-        // module whose top level never runs again, while this file is re-run on every mod
-        // reload — so a registration made before the actor definition was last edited stands
-        // for the rest of the browser's life, and nothing about it is visible: captures keep
-        // landing on the board and simply stop being live-capable.
+        // getActor throws when this process holds no usable registration for the actor —
+        // the boot registration in registry.sys.mjs failed and was logged, or something
+        // unregistered it since. Nothing about that is visible: captures keep landing on
+        // the board and simply stop being live-capable.
         //
-        // Re-registering here is what closes that gap, and it has to go through
-        // actors.sys.mjs rather than registry.sys.mjs: the registry is one of those cached
-        // background modules, so asking *it* to re-register only reinstalls whatever it was
-        // holding. See the header in actors.sys.mjs.
+        // Re-registering here is what closes that gap. It goes through actors.sys.mjs
+        // rather than the registry so it picks up only the definitions and none of the
+        // registry's boot side effects; see the header there.
         //
         // Only ZenEaselCapture is repaired. It is inert and has no instances to disturb;
         // the live actor is running inside every mounted tile and is not to be touched from

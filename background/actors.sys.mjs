@@ -1,20 +1,19 @@
 // Zen Easel — what the three window actors are, and how to install them.
 //
-// Split out of registry.sys.mjs, and the split is the point rather than tidiness.
+// Split out of registry.sys.mjs so a window script can install an actor without importing
+// the registry and its boot side effects. screenshot-hook.uc.js and capture-host.uc.js call
+// ensureActor() from every window, and ensureActor unregisters before it registers —
+// ChromeUtils.registerWindowActor throws on a name already taken and keeps the old
+// definition, so a bare register would be a no-op. That is what recovers an actor the boot
+// registration failed to install (registry.sys.mjs catches, logs and carries on).
 //
-// A background module is imported once per process. Its top level never runs again, so
-// editing it changes nothing until Zen is restarted — while the mod's window scripts are
-// re-run on every reload. Actor registration is process-global and
-// ChromeUtils.registerWindowActor *throws* on a name that is already taken, leaving the
-// existing registration in place. Put together: an actor registered by an older revision
-// of the mod goes on serving for the rest of the browser's life, and no amount of editing
-// or reloading can displace it, because the only code that could is itself the stale copy.
-//
-// This file is the way out of that. It is newer than any registration, so no process is
-// holding an older copy of it, which means a window script that imports it gets *these*
-// definitions and can install them over whatever is registered — without a restart. Keep
-// that property: never let this file's contents depend on another background module, and
-// prefer adding to it over reviving the definitions that used to live in registry.sys.mjs.
+// It does not get around the background-module cache. registry.sys.mjs imports this file
+// at boot, so every later importESModule of it returns that one copy; editing it changes
+// nothing until Zen is restarted, exactly like the registry. It used to be imported only on
+// demand, which let a window script bring a newer copy in without a restart; that stopped
+// being true the day the registry started importing it. Keep the file self-contained
+// anyway — no imports from other background modules — so it can go back to on-demand
+// import if that arrangement is ever wanted again.
 
 const ACTOR_BASE = "chrome://sine/content/zen-easel/actors/";
 
@@ -135,9 +134,9 @@ export const ACTOR_OPTIONS = {
 // document keep working, and only the definition used for the next one changes.
 //
 // Called per *window*, not once per process: screenshot-hook.uc.js runs this from every
-// window's init, because a window opening is the one moment a stale registration can be
-// displaced without a restart. It is a map insert and a notification, so the repetition
-// costs nothing. The one hazard worth knowing is narrow: a window opening in the gap
+// window's init, so an actor the boot registration failed to install is retried at the
+// next window rather than waiting for a restart. It is a map insert and a notification,
+// so the repetition costs nothing. The one hazard worth knowing is narrow: a window opening in the gap
 // between another window's getActor and its sendQuery would make that call fail, which is
 // what the retry around each getActor site is there to absorb.
 //

@@ -1,15 +1,14 @@
 // Zen Easel — page bootstrap.
 //
-// Runs at parse time from a <script> tag in easel.xhtml. This is the loader of record:
-// Sine also registers page/easel-page.uc.js against about:easel so edits hot-reload
-// while developing, but that path attaches on "load" and then awaits a JSON read off
-// disk, which lands after first paint. For a cold start — and especially for a
-// session-restored tab — the page has to be able to bring itself up.
+// Runs at parse time from a <script> tag in easel.xhtml, and is the only loader of the
+// page side: theme.json registers nothing against about:easel, so Sine never loads or
+// reloads these modules. Editing one means reloading the tab, which re-runs this from
+// scratch. Loading at parse time — rather than on "load" and then after a JSON read off
+// disk — is what makes a cold start, especially a session-restored tab, reliable.
 //
-// The two paths cooperate rather than race: whichever arrives second sees a live
-// gZenEaselPage and the module guards (`if (window.ZenEaselX) return`) make its work a
-// no-op, except that the Sine path deletes those globals first so an edited module
-// actually takes effect.
+// The module guards (`if (window.ZenEaselX) return`) stay because a parse-time script
+// can still be re-entered — a manual loadSubScript from the console, say — and a guard
+// costs one line.
 
 "use strict";
 

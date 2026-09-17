@@ -1,15 +1,14 @@
-/* Zen Easel — overlay styles.
+/* Zen Easel — styles for the <zen-easel> element on about:easel.
  *
- * Loaded into the shadow root of <zen-easel>. The global half of the mod (toolbar
- * button, capture overlay) lives in chrome.css instead; nothing here leaks out and
- * nothing out there reaches in.
+ * Loaded into the element's shadow root by easel-page.uc.js. The browser-window half of
+ * the mod (toolbar button, fonts, send-to-easel menu, the floating card bar) lives in
+ * chrome.css instead; nothing here leaks out and nothing out there reaches in.
  */
 
 :host {
-  /* Position and size are set inline by the controller, mirrored from the content
-     area so Zen's sidebar and toolbars stay visible and usable underneath. */
-  position: fixed;
-  z-index: 3;
+  /* The element fills its document: page/easel-page.css positions it (absolute, inset 0),
+     and a document rule on the host outranks anything :host says, so position is not set
+     here. */
   display: block;
   color-scheme: light dark;
 

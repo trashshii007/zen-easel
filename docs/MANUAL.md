@@ -1015,6 +1015,7 @@ window still open.
 | `modules-host/screenshot-hook.uc.js` | the **Easel** button on Zen's region bar and preview dialog, and the send-to-easel menu behind both |
 | `modules-host/capture-backdrop.uc.js` | works out what colour was behind the page, for both capture paths |
 | `modules-host/live-host.uc.js` | the live tiles themselves — `<browser>` elements, the layer over the easel tab, load watching |
+| `modules-host/live-tab-identity.uc.js` | experimental, behind the *extension identity* setting: gives each live tile a hidden tab so extensions such as uBlock Origin and Dark Reader treat it as one |
 | `modules-host/split-resize.uc.js` | not an easel feature: fixes a Zen split-divider bug where mouse events from an in-process about: page arrive in that page's coordinates, so the divider snaps and the panes strobe. Behind a setting, and meant to be deleted once Zen fixes it upstream |
 
 **In the page** — `about:easel` itself, a system-principal chrome document in the parent
@@ -1030,14 +1031,18 @@ process.
 | `modules/freehand.uc.js` | variable-width stroke geometry |
 | `modules/guides.uc.js` | Arc's six alignment guides |
 | `modules/live-layer.uc.js` | live web cards and web tiles: which are live, the cap and its LRU, crop geometry, activation |
+| `modules/media-layer.uc.js` | the `<img>` layer *under* the canvases — the only form in which an animated GIF actually animates; everything drawn on the board still paints over it |
 | `modules/text-editor.uc.js` | the textarea shown while editing a text box |
+| `modules/text-controls.uc.js` | the vertical strip beside a selected text box: typeface, paragraph style, highlighter |
+| `modules/shape-controls.uc.js` | the same strip beside a selected shape, offering solid fill or outline (not for lines and arrows) |
+| `modules/markdown.uc.js` | Markdown for text boxes: `parse()` source into blocks, `layout()` blocks into positioned runs; pure — no DOM, no HTML, links gated by `safeExternalUrl` |
 | `modules/store.uc.js` | the page's view of the store: open document, blob cache, debounce, thumbnails |
 | `modules/canvas.uc.js` | viewport transform, input, selection, undo, the title heading, export |
 | `modules/color-picker.uc.js` | the colour wheel panel, shared by the toolbar and the board menu |
 | `modules/tools.uc.js` | toolbar, colour and tool state, context menu |
 | `modules/capture-page.uc.js` | placing captures, drops, file import |
 | `modules/library.uc.js` | easel switcher |
-| `actors/` | the two JSActor pairs — see below |
+| `actors/` | the three JSActor pairs — see below |
 | `fonts/` | Arc's openly licensed Easel typefaces |
 
 ### Why `about:easel` is registered the way it is

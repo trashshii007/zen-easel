@@ -61,10 +61,11 @@
   <link rel="stylesheet" href="chrome://sine/content/zen-easel/page/easel-page.css"/>
 
   <!--
-    The loader of record. Sine also registers page/easel-page.uc.js against about:easel
-    so edits hot-reload, but that path attaches on "load" and then awaits a JSON read off
-    disk, which lands well after first paint. A parse-time <script> is deterministic and
-    is what makes a cold start — including a session-restored tab — reliable.
+    The only loader of the page side. Nothing is registered with Sine against about:easel
+    (theme.json lists just the host and the registry), so an edit to page/ or modules/
+    takes effect on a tab reload, not on a mod rebuild. A parse-time <script> is
+    deterministic and is what makes a cold start — including a session-restored tab —
+    reliable.
   -->
   <script src="chrome://sine/content/zen-easel/page/easel-boot.js"/>
 </head>
