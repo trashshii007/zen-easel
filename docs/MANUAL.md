@@ -304,6 +304,7 @@ property of the thing you are looking at:
 | **Aa** | typeface list, each row previewed in its own face |
 | **Body** / **H2** / **H1** / **H0** / **Ultra** | opens Arc's five paragraph styles — 32, 52, 80, 120 and 180px. The button is labelled with the size the box is currently on, or **··** when it is on none of them |
 | **▮** | the highlighter |
+| **M↓** | Markdown mode for the box |
 
 Both lists are the same popup. The five styles used to sit inline as five buttons down
 the side of the strip, which made the strip taller than most of the boxes it annotated
@@ -316,6 +317,30 @@ instead of a coloured panel behind the paragraph. The lettering flips to black o
 for legibility against whichever swatch you picked.
 
 All of these apply live to the selected box, including while you are typing in it.
+
+#### Markdown
+
+**M↓** turns a box into a Markdown box: what you type is kept as Markdown source, the
+textarea edits that source, and the board paints it rendered. Headings (`#` through
+`######`, and setext underlines), paragraphs, `**bold**`, `*italic*`, `~~strike~~`,
+`` `code` ``, fenced and indented code blocks, bullet, numbered and `- [ ]` task lists
+(nested by indent), `>` quotes, `---` rules, pipe tables with `:--:` alignment, hard
+line breaks (two trailing spaces or a backslash), `[links](https://…)`, `<autolinks>`
+and bare URLs are all rendered. Raw HTML is not: a tag is drawn as the literal text you
+typed, and `![images](…)` are drawn as their alt text as a link, because the board
+cannot load remote content. A link opens the same way a card's link button does —
+with a plain click when the pointer shows a hand over it, in a tab or a Glance. Links in
+a locked box are inert, since a locked box takes no pointer at all.
+
+The box's text size is the **body** size; headings scale up from it, so the size
+presets scale the whole document. Code always uses Inconsolata regardless of the box's
+typeface. Inter and Inconsolata ship with no italic face, so italics in those two are
+synthesised by Gecko. The highlighter works per rendered line as it does for plain text.
+
+While the source is open for editing, **Ctrl+B**, **Ctrl+I** and **Ctrl+K** wrap the
+selection as bold, italic and a link, **Tab** / **Shift+Tab** indent and outdent the
+line, and **Enter** on a list item continues the list (on an empty item it ends it).
+The setting is remembered for the next box you create, like the typeface.
 
 Available typefaces are the ones Arc itself uses in Easels, limited to those that are
 openly licensed: **Inter**, **Nunito**, **EB Garamond**, **Inconsolata** and

@@ -46,6 +46,10 @@
     // what a document arrives carrying.
     const DEFAULT_TITLE = "Untitled Easel";
 
+    // Width of a new text box, from the T button and from dropped or pasted text alike.
+    // Read by capture-page through the class, so the two paths cannot drift.
+    const TEXT_BOX_WIDTH = 840;
+
     // Controls that float over the canvas inside the viewport. Pointer events landing
     // on any of these belong to them, not to the board.
     // Anything added to the viewport that the user is meant to click has to be listed
@@ -455,7 +459,7 @@
                 const hit = this._hitTest(world.x, world.y);
                 if (hit && hit.id !== activeId) {
                     id = hit.id;
-                    part = this._hitChrome(hit, world);
+                    part = this._hitChrome(hit, world) || this._hitMarkdownLink(hit, world);
                 }
             }
 
@@ -465,6 +469,24 @@
             // Overlay only — the glow and the bar both ride on state that is rebuilt every
             // frame, so the committed scene does not need repainting for a hover.
             this.invalidateOverlay();
+        }
+
+        // "mdlink" when the pointer is over a link in a rendered Markdown box, else null.
+        // Same local-frame trick as _hitChrome, so a rotated box hit-tests its links too.
+        _hitMarkdownLink(obj, world) {
+            if (obj.type !== "text" || !obj.text.markdown) return null;
+            const point = this.Objects.toLocal(obj, world.x, world.y);
+            return this.renderer.markdownLinkAt(obj, point.x - obj.x, point.y - obj.y) ? "mdlink" : null;
+        }
+
+        // The pointer cursor over a link, derived on the frame rather than written from
+        // _applyHoverAt: clearHover, _dismissCardChrome and an editor opening under a
+        // resting pointer all change the answer without passing through there.
+        _applyLinkCursor() {
+            const on = this._hoverPart === "mdlink" && this._hoverActive();
+            if (on === this._linkCursor) return;
+            this._linkCursor = on;
+            this.root.toggleAttribute("data-easel-link", on);
         }
 
         // Drops the hover *result* but keeps the record of where the pointer is, which are
@@ -805,6 +827,7 @@
             // moved the view. It compares a signature first, so a board that is not
             // moving costs one string build per frame and no style write at all.
             this._applyGrid();
+            this._applyLinkCursor();
 
             if (this._staticDirty) {
                 // Three reasons to skip an object: it is live on the active canvas, the
@@ -1983,6 +2006,22 @@
                 }
             }
 
+            // A link in a rendered Markdown box. Gated on the hover state the same way
+            // the bar is gated on _chromeShown: hover is suppressed while the editor is
+            // open, so the click that dismissed an editor above cannot also open a link
+            // that nobody was shown a pointer cursor for.
+            if (hit.type === "text" && !e.shiftKey && !e.ctrlKey &&
+                this._hoverId === hit.id && this._hoverPart === "mdlink") {
+                const point = this.Objects.toLocal(hit, world.x, world.y);
+                const href = this.renderer.markdownLinkAt(hit, point.x - hit.x, point.y - hit.y);
+                if (href) {
+                    this.select([hit.id]);
+                    const bridge = this.host.bridge;
+                    if (bridge) bridge.openUrl(href);
+                    return;
+                }
+            }
+
             // Clicking a live card hands the pointer straight to the page inside it —
             // one click, because anything more makes the card feel dead. Shift and Ctrl
             // are excluded so multi-select and duplicate still reach the board.
@@ -2628,7 +2667,7 @@
             if (!this.doc) return;
 
             const tools = this.host.tools;
-            const width = 420;
+            const width = TEXT_BOX_WIDTH;
             const centre = at || this.toWorld(this.renderer.width / 2, this.renderer.height / 2);
 
             const obj = this.Objects.createObject("text", {
@@ -2641,7 +2680,8 @@
                     content: "Textbox",
                     fontSize: tools.fontSize,
                     fontFamily: tools.fontFamily,
-                    align: "left"
+                    align: "left",
+                    markdown: !!tools.markdown
                 }
             });
             obj.h = this.renderer.measureTextHeight(obj);
@@ -3351,7 +3391,10 @@
                 const obj = this._byId(id);
                 if (obj && obj.type === "text") {
                     Object.assign(obj.text, patch);
-                    obj.h = this.renderer.measureTextHeight(obj);
+                    // The box under an open textarea keeps its editing height, or toggling Markdown mid-edit would snap it.
+                    obj.h = id === editing
+                        ? this.host.textEditor.editingHeight(obj)
+                        : this.renderer.measureTextHeight(obj);
                 }
             }
 
@@ -3362,6 +3405,8 @@
             return true;
         }
     }
+
+    ZenEaselCanvas.TEXT_BOX_WIDTH = TEXT_BOX_WIDTH;
 
     window.ZenEaselCanvas = ZenEaselCanvas;
 })();

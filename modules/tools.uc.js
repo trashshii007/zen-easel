@@ -72,6 +72,8 @@
             // have.
             this.fontSize = 32;
             this.fontFamily = "system";
+            // Whether the next text box renders its content as Markdown; set from the text controls like the font.
+            this.markdown = false;
 
             this._buttons = new Map();
             this._menu = null;

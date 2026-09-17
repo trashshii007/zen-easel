@@ -73,11 +73,21 @@
                 onclick: e => { e.stopPropagation(); this._toggleFill(); }
             });
 
+            // Markdown mode: the box keeps its source and the canvas paints it rendered.
+            this._markdownToggle = this.el("button", {
+                className: "easel-text-fill easel-text-md",
+                type: "button",
+                title: "Markdown",
+                textContent: "M↓",
+                onclick: e => { e.stopPropagation(); this._toggleMarkdown(); }
+            });
+
             this._element = this.el("div", { className: "easel-text-controls" }, [
                 this._fontToggle,
                 this._sizeToggle,
                 this.el("div", { className: "easel-text-divider" }),
-                this._fillToggle
+                this._fillToggle,
+                this._markdownToggle
             ]);
             this.root.appendChild(this._element);
         }
@@ -141,6 +151,12 @@
                 this._lastFill = hugging;
                 this._fillToggle.classList.toggle("is-active", hugging);
             }
+
+            const markdown = target.text.markdown === true;
+            if (markdown !== this._lastMarkdown) {
+                this._lastMarkdown = markdown;
+                this._markdownToggle.classList.toggle("is-active", markdown);
+            }
         }
 
         // The box being edited wins; otherwise a single selected text object. A
@@ -181,6 +197,16 @@
             const target = this._targetId && canvas._byId(this._targetId);
             if (!target) return;
             canvas.setSelectionText({ fill: target.text.fill === "hug" ? "none" : "hug" });
+        }
+
+        _toggleMarkdown() {
+            const canvas = this.host.canvas;
+            const target = this._targetId && canvas._byId(this._targetId);
+            if (!target) return;
+            const markdown = target.text.markdown !== true;
+            // Remembered for the next box, the way the font and size are.
+            this.host.tools.markdown = markdown;
+            canvas.setSelectionText({ markdown });
         }
 
         /* ---------------------------------------------------------- the panel */

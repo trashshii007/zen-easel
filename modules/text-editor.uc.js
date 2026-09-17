@@ -46,6 +46,8 @@
                 wrap: "soft"
             });
             area.value = obj.text.content || "";
+            // A Markdown box shows its source here, which can be taller than the rendered box.
+            obj.h = this.editingHeight(obj);
 
             area.addEventListener("input", this._onInput);
             area.addEventListener("blur", this._onBlur);
@@ -101,6 +103,17 @@
             });
         }
 
+        // The height the box takes while its textarea is open. Plain text is what it
+        // is; a Markdown box shows raw source, so it needs room for whichever of the
+        // source and the rendered layout is taller or a long fence types into a clipped
+        // box. commit() puts the rendered height back.
+        editingHeight(obj) {
+            const renderer = this.host.canvas.renderer;
+            const rendered = renderer.measureTextHeight(obj);
+            if (!obj.text.markdown) return rendered;
+            return Math.max(rendered, renderer.measureTextHeight(obj, { source: true }));
+        }
+
         _onInput() {
             const canvas = this.host.canvas;
             const obj = canvas._byId(this.editing);
@@ -110,7 +123,7 @@
             // Height comes from the renderer's own measurement rather than from the
             // textarea, so the box the canvas will paint and the box being edited
             // agree exactly.
-            obj.h = canvas.renderer.measureTextHeight(obj);
+            obj.h = this.editingHeight(obj);
             this.reposition();
             canvas.invalidate();
             canvas._touch();
@@ -125,8 +138,72 @@
                 this.host.canvas.stopEditing();
                 return;
             }
+            const obj = this.host.canvas._byId(this.editing);
+            if (obj && obj.text.markdown && this._markdownKey(e)) {
+                // about:easel is a parent-process page: without this Ctrl+B/I/K reach
+                // Zen's own bindings and Tab moves focus out, which blurs and commits.
+                e.preventDefault();
+                e.stopPropagation();
+                this._onInput();
+                return;
+            }
             // Stop canvas shortcuts from firing while typing.
             e.stopPropagation();
+        }
+
+        // Source-editing conveniences for a Markdown box. Returns true when it handled
+        // the key. Everything goes through setRangeText so the textarea's own undo works.
+        _markdownKey(e) {
+            const area = this._element;
+            const ctrl = e.ctrlKey && !e.altKey && !e.shiftKey;
+
+            if (ctrl && (e.code === "KeyB" || e.code === "KeyI" || e.code === "KeyK")) {
+                const start = area.selectionStart, end = area.selectionEnd;
+                const selected = area.value.slice(start, end);
+                if (e.code === "KeyK") {
+                    area.setRangeText(`[${selected}](url)`, start, end, "end");
+                    // Leave "url" selected so typing replaces it.
+                    area.setSelectionRange(start + selected.length + 3, start + selected.length + 6);
+                } else {
+                    const mark = e.code === "KeyB" ? "**" : "*";
+                    area.setRangeText(`${mark}${selected}${mark}`, start, end, "end");
+                    area.setSelectionRange(start + mark.length, start + mark.length + selected.length);
+                }
+                return true;
+            }
+
+            if (e.code === "Tab" && !e.ctrlKey && !e.altKey) {
+                const start = area.selectionStart, end = area.selectionEnd;
+                const lineStart = area.value.lastIndexOf("\n", start - 1) + 1;
+                if (e.shiftKey) {
+                    const lead = area.value.slice(lineStart, lineStart + 2);
+                    const drop = lead === "  " ? 2 : lead[0] === " " ? 1 : 0;
+                    if (drop) area.setRangeText("", lineStart, lineStart + drop, "preserve");
+                } else if (start === end) {
+                    area.setRangeText("  ", start, end, "end");
+                } else {
+                    area.setRangeText("  ", lineStart, lineStart, "preserve");
+                }
+                return true;
+            }
+
+            if (e.code === "Enter" && !e.ctrlKey && !e.altKey && !e.shiftKey && area.selectionStart === area.selectionEnd) {
+                const pos = area.selectionStart;
+                const lineStart = area.value.lastIndexOf("\n", pos - 1) + 1;
+                const line = area.value.slice(lineStart, pos);
+                const m = line.match(/^(\s*)([-*+]|\d{1,9}[.)])(\s+)(\[[ xX]\]\s+)?(.*)$/);
+                if (!m) return false;
+                // Enter on an empty item ends the list instead of adding another marker.
+                if (!m[5]) {
+                    area.setRangeText("", lineStart, pos, "end");
+                    return true;
+                }
+                const num = m[2].match(/^(\d+)([.)])$/);
+                const marker = num ? `${parseInt(num[1], 10) + 1}${num[2]}` : m[2];
+                area.setRangeText(`\n${m[1]}${marker}${m[3]}${m[4] ? "[ ] " : ""}`, pos, pos, "end");
+                return true;
+            }
+            return false;
         }
 
         _onBlur(event) {
@@ -162,6 +239,7 @@
             const obj = canvas._byId(id);
             if (obj) {
                 obj.text.content = area.value;
+                // Rendered height, not the editing height: the source is no longer on show.
                 obj.h = canvas.renderer.measureTextHeight(obj);
             }
 

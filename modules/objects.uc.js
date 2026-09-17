@@ -774,6 +774,8 @@
             obj.text.fontSize = num(obj.text.fontSize, 32);
             if (!FONT_BY_KEY.has(obj.text.fontFamily)) obj.text.fontFamily = "system";
             if (!TEXT_FILLS.includes(obj.text.fill)) obj.text.fill = "none";
+            // Coerced like locked: the renderer branches on it, and a hand-edited "yes" must not count.
+            obj.text.markdown = obj.text.markdown === true;
         } else if (obj.type === "shape") {
             if (!obj.shape || typeof obj.shape !== "object") obj.shape = {};
             if (!["rectangle", "ellipse", "triangle", "line", "arrow"].includes(obj.shape.kind)) {

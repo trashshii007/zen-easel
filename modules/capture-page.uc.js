@@ -278,17 +278,21 @@
         // migrated it. The escaping went with it: canvas text is plain, and round-tripping
         // it through pseudo-HTML only produced "&amp;" artefacts.
         _addTextObject(text, at) {
+            const canvas = this.host.canvas;
             const obj = window.ZenEaselObjects.createObject("text", {
-                x: Math.round(at.x), y: Math.round(at.y), w: 280,
+                x: Math.round(at.x), y: Math.round(at.y), w: canvas.constructor.TEXT_BOX_WIDTH,
                 color: this.host.tools.color,
                 text: {
                     content: text,
                     fontSize: this.host.tools.fontSize,
                     fontFamily: this.host.tools.fontFamily || "system",
-                    align: "left"
+                    align: "left",
+                    markdown: !!this.host.tools.markdown
                 }
             });
-            this.host.canvas.addObjects([obj], { select: false });
+            // Sized to its content now, not on first edit: the model default is one line.
+            obj.h = canvas.renderer.measureTextHeight(obj);
+            canvas.addObjects([obj], { select: false });
             return obj;
         }
 

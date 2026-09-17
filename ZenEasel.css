@@ -973,6 +973,16 @@
   color: var(--easel-accent-strong);
 }
 
+/* The Markdown toggle shares the highlighter's shape; the glyph is the M↓ mark. */
+.easel-text-md {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: -0.04em;
+}
+
+/* Over a link in a rendered Markdown box; set from the canvas paint loop. */
+.easel-viewport[data-easel-link] { cursor: pointer; }
+
 .easel-text-font:hover { background: var(--easel-hover-bg); }
 .easel-text-font.is-open { background: var(--easel-accent-soft); color: var(--easel-accent-strong); }
 

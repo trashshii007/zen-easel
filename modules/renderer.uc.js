@@ -154,6 +154,7 @@
 
             ensureFonts().then(() => {
                 this._wrapCache.clear();
+                window.ZenEaselMarkdown.invalidate();
                 if (this.host.canvas) this.host.canvas.invalidate();
             });
         }
@@ -652,6 +653,7 @@
         _drawText(ctx, obj) {
             const content = obj.text.content || "";
             if (!content) return;
+            if (obj.text.markdown) return this._drawMarkdown(ctx, obj);
 
             const font = this._fontString(obj);
             this._ensureFont(font);
@@ -710,6 +712,121 @@
             for (let i = 0; i < lines.length; i++) {
                 ctx.fillText(lines[i], originX, obj.y + TEXT_PAD_Y + halfLeading + i * lineHeight);
             }
+        }
+
+        // The rendered-Markdown path. Geometry comes from the markdown module in
+        // object-local pixels and is colour-free; colour is resolved here so a swatch
+        // change never forces a re-layout.
+        _drawMarkdown(ctx, obj) {
+            const layout = this._markdownLayout(obj);
+            for (const font of layout.fonts) this._ensureFont(font);
+
+            const color = this.Objects.colorCss(obj.color);
+            const rgb = this.Objects.rgbOf(color) || [0, 0, 0];
+            const tint = alpha => `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${alpha})`;
+            const hugging = obj.text.fill === "hug";
+            const fontSize = obj.text.fontSize || 32;
+
+            ctx.save();
+            ctx.translate(obj.x, obj.y);
+            ctx.textBaseline = "top";
+            ctx.textAlign = "left";
+
+            for (const d of layout.decorations) {
+                switch (d.kind) {
+                    case "codeblock":
+                        ctx.fillStyle = tint(0.08);
+                        ctx.beginPath();
+                        this._roundRect(ctx, d.x, d.y, d.w, d.h, d.r);
+                        ctx.fill();
+                        break;
+                    case "codespan":
+                        if (hugging) break;
+                        ctx.fillStyle = tint(0.1);
+                        ctx.beginPath();
+                        this._roundRect(ctx, d.x, d.y, d.w, d.h, Math.min(4, d.h * 0.2));
+                        ctx.fill();
+                        break;
+                    case "quote-bar":
+                        ctx.fillStyle = tint(0.35);
+                        ctx.fillRect(d.x, d.y, d.w, d.h);
+                        break;
+                    case "hr":
+                    case "table-rule":
+                        ctx.fillStyle = tint(0.35);
+                        ctx.fillRect(d.x, d.y, d.w, d.h);
+                        break;
+                    case "checkbox":
+                        ctx.lineWidth = Math.max(1, d.w * 0.09);
+                        ctx.strokeStyle = tint(0.7);
+                        ctx.beginPath();
+                        this._roundRect(ctx, d.x, d.y, d.w, d.h, d.r);
+                        if (d.checked) {
+                            ctx.fillStyle = color;
+                            ctx.fill();
+                            ctx.strokeStyle = this.Objects.luminanceOf(color) > 0.45 ? "#101014" : "#ffffff";
+                            ctx.lineWidth = Math.max(1.5, d.w * 0.12);
+                            ctx.beginPath();
+                            ctx.moveTo(d.x + d.w * 0.25, d.y + d.h * 0.52);
+                            ctx.lineTo(d.x + d.w * 0.43, d.y + d.h * 0.72);
+                            ctx.lineTo(d.x + d.w * 0.76, d.y + d.h * 0.3);
+                            ctx.stroke();
+                        } else {
+                            ctx.stroke();
+                        }
+                        break;
+                }
+            }
+
+            // Same highlighter as the plain path: a block per line, hugging the measured width.
+            let ink = color;
+            if (hugging) {
+                ctx.fillStyle = color;
+                const padX = fontSize * 0.22;
+                const padY = fontSize * 0.08;
+                const radius = Math.min(6, fontSize * 0.18);
+                for (const line of layout.lines) {
+                    if (!line.width || line.marker) continue;
+                    ctx.beginPath();
+                    this._roundRect(ctx, line.x - padX, line.y - padY, line.width + padX * 2, line.height + padY * 2, radius);
+                    ctx.fill();
+                }
+                ink = this.Objects.luminanceOf(color) > 0.45 ? "#101014" : "#ffffff";
+            }
+
+            ctx.fillStyle = ink;
+            for (const line of layout.lines) {
+                for (const run of line.runs) {
+                    if (!run.text) continue;
+                    ctx.font = run.font;
+                    ctx.fillText(run.text, run.x, run.y);
+                    if (run.underline || run.strike) {
+                        const width = ctx.measureText(run.text).width;
+                        const thickness = Math.max(1, run.px * 0.06);
+                        const y = run.underline ? run.y + run.px * 1.02 : run.y + run.px * 0.55;
+                        ctx.fillRect(run.x, y, width, thickness);
+                    }
+                }
+            }
+            ctx.restore();
+        }
+
+        _markdownLayout(obj) {
+            return window.ZenEaselMarkdown.layoutFor(obj, this.staticCtx, {
+                width: obj.w,
+                fontSize: obj.text.fontSize || 32,
+                fontCss: this.Objects.fontCss(obj.text.fontFamily),
+                align: obj.text.align || "left",
+                lineHeight: LINE_HEIGHT,
+                padX: TEXT_PAD_X,
+                padY: TEXT_PAD_Y
+            });
+        }
+
+        // The link under an object-local point of a Markdown box, or null.
+        markdownLinkAt(obj, localX, localY) {
+            if (!obj.text.markdown || !(obj.text.content || "")) return null;
+            return window.ZenEaselMarkdown.linkAt(this._markdownLayout(obj), localX, localY);
         }
 
         // Animated images are not painted here during normal rendering — they are
@@ -1055,6 +1172,7 @@
                 if (document.fonts && document.fonts.load) {
                     document.fonts.load(font).then(() => {
                         this._wrapCache.clear();
+                        window.ZenEaselMarkdown.invalidate();
                         if (this.host.canvas) this.host.canvas.invalidate();
                     }).catch(() => { });
                 }
@@ -1103,7 +1221,11 @@
 
         // Height the object needs at its current width. Used instead of the old
         // offsetHeight read, which forced a synchronous layout every frame.
-        measureTextHeight(obj) {
+        // `source: true` measures a Markdown box's raw source as plain text — what the
+        // textarea shows while editing — instead of the rendered layout.
+        measureTextHeight(obj, { source = false } = {}) {
+            if (obj.text.markdown && !source) return this._markdownLayout(obj).height;
+
             const ctx = this.staticCtx;
             const font = this._fontString(obj);
             this._ensureFont(font);
@@ -1183,6 +1305,7 @@
         releaseImages() {
             this._images.clear();
             this._wrapCache.clear();
+            window.ZenEaselMarkdown.invalidate();
             this._inkCache.clear();
         }
 
