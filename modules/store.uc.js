@@ -197,12 +197,13 @@
                 // Any string — including one pointing at an object that has since been
                 // deleted — means the question has already been settled for this easel.
                 titleObjectId: typeof raw.titleObjectId === "string" ? raw.titleObjectId : undefined,
-                // Arc's CanvasMode. Only the two known values survive, so a hand-edited
-                // or half-written field can never leave a board unopenable — anything
-                // else, including a board saved before the field existed, opens on the
-                // default. A board explicitly saved as "fixed" keeps its fixed page.
-                canvasMode: raw.canvasMode === "fixed"
-                    ? "fixed"
+                // Only the two known values survive, so a hand-edited or half-written
+                // field can never leave a board unopenable — anything else, including a
+                // board saved before the field existed, opens on the default. "fixed" is
+                // the retired 3600-unit sheet: it opens as infinite, the one mode that can
+                // show a page wider than the window without cutting anything off.
+                canvasMode: raw.canvasMode === "infinite" || raw.canvasMode === "fixed"
+                    ? "infinite"
                     : raw.canvasMode === "verticallyScrolling"
                         ? "verticallyScrolling"
                         : Objects.DEFAULT_CANVAS_MODE,

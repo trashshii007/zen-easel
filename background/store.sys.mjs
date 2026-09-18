@@ -302,8 +302,8 @@ class EaselStoreImpl {
             // (modules/objects.uc.js), repeated as literals because this is a
             // per-process background module and that one is per window. "theme" is the
             // board with no colour of its own, so a new easel comes up matching Zen's
-            // light or dark scheme; "verticallyScrolling" is the board that fits the
-            // window rather than the fixed 3600-unit sheet. Written explicitly rather
+            // light or dark scheme; "verticallyScrolling" is Arc mode, the board that
+            // fits the window, rather than the infinite canvas. Written explicitly rather
             // than left out so a new document reads the same as an established one.
             background: "theme",
             canvasMode: "verticallyScrolling",

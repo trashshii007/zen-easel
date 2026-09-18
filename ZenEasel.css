@@ -425,6 +425,9 @@
 /* No rule for data-tool="image": it is an action, not a mode — the button opens the
    file picker directly and the tool is back to the pointer before the cursor could
    ever be seen. */
+/* Picking the Arc-mode page. After the tool rules: same specificity, and the pick takes
+   the press whatever tool is armed, so it takes the cursor too. */
+.easel-viewport[data-picking] { cursor: crosshair; }
 
 /* No document open — only reachable if the store failed to load or create one. */
 .easel-viewport.is-empty-document::before {
@@ -570,6 +573,44 @@
 }
 
 .easel-icon { width: 20px; height: 20px; }
+
+/* --------------------------------------------------------------- mode toggle */
+
+/* Infinite canvas ⇄ Arc mode, at the viewport's top-right. Inside the viewport rather than
+   the root so it sits under the topbar and stays at the *canvas's* corner when the topbar
+   is hidden. Same panel treatment as the toolbar, so the two read as one set of controls.
+   z-index 5, as the text controls: 4 would tie the overlay canvas and leave DOM order to
+   decide. Live tiles are kept off it by the live layer's CHROME_SELECTOR. */
+.easel-mode-toggle {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid var(--easel-panel-border);
+  border-radius: 12px;
+  background: var(--easel-panel);
+  color: var(--easel-tool-ink);
+  box-shadow: var(--easel-shadow);
+  backdrop-filter: blur(20px) saturate(140%);
+  cursor: pointer;
+  z-index: 5;
+  animation: easel-rise 220ms var(--easel-ease) both;
+  transition: background 140ms var(--easel-ease), color 140ms var(--easel-ease),
+              transform 140ms var(--easel-ease);
+}
+
+.easel-mode-toggle:hover { background: var(--easel-hover-bg); }
+.easel-mode-toggle:active { transform: scale(0.92); }
+
+/* On the infinite canvas the button wears the accent, the way an armed tool does; while
+   the frame pick is up it is the cancel, and reads as pressed. */
+.easel-mode-toggle.is-infinite { color: var(--easel-accent-strong); }
+.easel-mode-toggle.is-picking { background: var(--easel-active-bg); }
 
 /* One button standing in for the whole palette. The dot shows the current colour and
    its diameter shows the current stroke width, so the toolbar reports both without

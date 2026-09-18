@@ -55,6 +55,7 @@
         ".easel-font-panel",
         ".easel-text-controls",   // the strips that ride alongside a selected object
         ".easel-shape-controls",
+        ".easel-mode-toggle",     // infinite / Arc mode, top-right of the viewport
         ".easel-error"
     ].join(",");
 

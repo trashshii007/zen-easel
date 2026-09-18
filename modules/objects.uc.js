@@ -288,23 +288,18 @@
     // instead of a coloured rectangle behind it.
     const TEXT_FILLS = ["none", "hug"];
 
-    // The board is a page, read like a PDF: fixed width, top edge at y = 0, and it
-    // extends downward as content is added. Zooming out stops at fit-width, so the page
-    // always spans the window and there is never dead space beside it.
-    // Wide enough that 100% zoom is still reachable on a large monitor. Fit-width is
-    // the zoom-out limit, so a narrow page would force everything to be magnified on a
-    // wide window — a 2400 page on a 3400px display pins you at 1.4x and never lets go.
-    const PAGE_WIDTH = 3600;
-
-    // How much empty room to leave below the lowest object, in multiples of the window
-    // height. Enough to work into without the page being endlessly, uselessly long.
+    // In Arc mode the board is a page read like a PDF: the width of the window, top edge
+    // at y = 0, extending downward as content is added. How much empty room to leave
+    // below the lowest object, in multiples of the window height — enough to work into
+    // without the page being endlessly, uselessly long.
     const PAGE_TRAILING_SCREENS = 3;
 
-    // Arc's CanvasMode for a board that has not chosen one: "verticallyScrolling" — the
-    // board is the width of the window and reflows with it — rather than the fixed
-    // PAGE_WIDTH sheet. See the note on canvasMode in canvas.uc.js for what the two
-    // modes actually differ on. Repeated as a literal in background/store.sys.mjs,
-    // which writes it into every new document and cannot import this file.
+    // A board's canvasMode is "verticallyScrolling" (Arc mode: the page above, reflowing
+    // with the window) or "infinite" (an unbounded plane, Excalidraw-style). New boards
+    // start in Arc mode: a board that is exactly the window is what someone opening a
+    // blank easel expects. See the note on canvasMode in canvas.uc.js. Repeated as a
+    // literal in background/store.sys.mjs, which writes it into every new document and
+    // cannot import this file.
     const DEFAULT_CANVAS_MODE = "verticallyScrolling";
 
     // Relative luminance of a computed color string, used to decide whether the grid
@@ -891,7 +886,6 @@
         DEFAULT_SIZE,
         OPACITY,
         clampOpacity,
-        PAGE_WIDTH,
         PAGE_TRAILING_SCREENS,
         DEFAULT_CANVAS_MODE,
         fontCss,

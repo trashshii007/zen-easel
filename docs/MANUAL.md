@@ -74,15 +74,21 @@ by gesture.
 The wheel zooms by default. Set `zen.easel.wheel` to `pan` if you would rather it
 scrolled — `Ctrl`+wheel zooms either way.
 
-### The board is a page
+### Two ways to hold the board
 
-It reads like a PDF rather than an unbounded plane. The page has a **fixed width**, and
-**zooming out stops at fit-width** — so the page always spans the window and there is
-never dead space beside it. You start at the top and scroll **down** to uncover more.
+A board opens in **Arc mode**, where it reads like a PDF rather than an unbounded plane:
+the page is **the width of the window**, and **zooming out stops at fit-width** — so the
+page always spans the window and there is never dead space beside it. You start at the top
+and scroll **down** to uncover more; never up, and never sideways.
 
 The page **grows with your work**: its bottom always sits three window-heights below the
 lowest thing on it, so there is room to keep going without the board being endlessly,
 uselessly long. An easel you can get lost in has no home to return to.
+
+When you want the plane instead, the **∞ button at the top-right of the canvas** switches
+the board to an **infinite canvas** — pan and zoom in every direction, the way Excalidraw
+does. Pressing it again brings you back to Arc mode by asking which part of the plane
+should become the top of the page. See "Infinite canvas and Arc mode" below.
 
 ### Editing
 
@@ -879,21 +885,34 @@ and live cards and web tiles are exported as their screenshot or frame — the f
 picture of the board, which is the only thing an easel can sensibly be exported as. Arc
 does the same, and exports JPEG.
 
-### Reflowing with the window
+### Infinite canvas and Arc mode
 
-Arc's canvas is `verticallyScrolling`: the document has no width of its own — it *is* the
-width of the window, and the board is relaid out whenever that changes. This mod's own
-model is a fixed 3600-unit page with fit-width as the zoom-out limit. At fit-width the two
-are indistinguishable; they part company when you resize.
+Every easel is in one of two modes, remembered per board, and the button at the top-right
+of the canvas switches between them.
 
-Both are available, per easel, from the canvas right-click menu — **Fit the board to the
-window**. It is on by default for new easels: a board that is exactly the window is what
-opening a blank easel should give you, and the fixed sheet only earns its keep once there
-is enough on the board to want a page wider than the view. Boards saved before this
-default changed keep the fixed page they were drawn on, and either mode is one click away
-on any board. Switching adopts the current width as the layout width, so nothing moves at
-the moment you switch; from then on the board scales with the window, keeping every
-object's position and size relative to the page, the way Arc's does.
+**Arc mode** is Arc's own `verticallyScrolling` canvas: the document has no width of its
+own — it *is* the width of the window, the top edge is the top of the page, and the board
+is relaid out whenever the window's width changes, keeping every object's position and
+size relative to the page the way Arc's does. It is the mode every new easel starts in,
+and it always fits the board to the window; there is no separate fixed-width sheet any
+more (a board saved with the old `fixed` layout opens as infinite, so nothing on it is cut
+off).
+
+**Infinite canvas** lifts the page: pan and zoom anywhere, in every direction, down to
+10%. Switching to it moves nothing — the view stays where it was, the clamp simply lets go.
+
+Switching *back* to Arc mode is a gesture, because a plane has no top-left of its own.
+Press the button and the board dims: **drag the area you want as the top of the page**.
+The frame keeps the window's proportions, so what you draw is exactly what the page opens
+on; let go and it fills the window at 100%, with the board scrolling down from there.
+**Click** without dragging to use the view you are already looking at. **Esc** cancels
+and leaves the board infinite. Anything left of or above the frame is kept, at negative
+coordinates: Select all and `Tab` still select it and an export still includes it, but
+the page cannot scroll past its own top-left, so nothing shows it — not even Zoom to fit —
+until you toggle back to the infinite canvas, which brings it into view. Undo
+history is cleared by the switch, since an undo from before it would put objects back at
+their pre-frame coordinates. Live web tiles stay undimmed during the pick: they are
+browser elements above the page, not part of its drawing.
 
 This is the whole of what "Arc uses a different canvas setup" amounts to, and it is
 already here. Arc's easel is native AppKit — `EaselCanvasViewController`, one `NSView`

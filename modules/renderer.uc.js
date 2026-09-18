@@ -1371,6 +1371,29 @@
                 ctx.strokeRect(m.x, m.y, m.w, m.h);
             }
 
+            // Picking the Arc-mode page: everything the frame will leave off-page is
+            // dimmed, and the frame itself is the one bright rectangle — which is what
+            // says "this becomes your view" without a word of instruction. Live tiles
+            // are <browser> elements above this document, so they stay undimmed; hiding
+            // them through suppressOverlapping would tangle with a context menu opened
+            // mid-pick, whose close releases every suppression at once.
+            if (state.picking) {
+                const f = state.pickFrame;
+                ctx.save();
+                ctx.fillStyle = "rgba(0, 0, 0, 0.35)";
+                ctx.beginPath();
+                // The whole backing store, for the same reason _begin clears all of it.
+                ctx.rect(0, 0, this.bufferWidth, this.bufferHeight);
+                if (f) ctx.rect(f.x, f.y, f.w, f.h);
+                ctx.fill("evenodd");
+                if (f) {
+                    ctx.strokeStyle = accent;
+                    ctx.lineWidth = 1.5;
+                    ctx.strokeRect(f.x, f.y, f.w, f.h);
+                }
+                ctx.restore();
+            }
+
             // Alignment guides are drawn before the selection chrome and outside its
             // early return: they belong to the drag, not to the selection, and a drag
             // that snaps while the frame is hidden still needs to show why.

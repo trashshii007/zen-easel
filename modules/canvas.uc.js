@@ -31,10 +31,9 @@
     const ZOOM_STEP = 1.15;
     const UNDO_LIMIT = 100;
     const HANDLE_TOLERANCE = 3;
-    // The board is a page, not an unbounded plane: fixed width, top edge at y = 0, and
-    // unbounded downward. An infinite canvas in every direction means there is no
-    // "home" and nothing to anchor a layout to — you can always be lost in blank space.
-    const PAGE_WIDTH = window.ZenEaselObjects.PAGE_WIDTH;
+    // A frame dragged narrower than this on screen while picking the Arc-mode page is a
+    // click, and a click means "the view I am looking at".
+    const FRAME_MIN_PX = 12;
 
     // Where an easel's heading sits — Arc's defaultTitleFrame. Far enough down that the
     // lettering is not jammed against the top edge, and never above y = 0, which the page
@@ -65,7 +64,9 @@
         ".easel-text-editor",
         ".easel-text-controls",
         ".easel-shape-controls",
-        ".easel-font-panel"
+        ".easel-font-panel",
+        // The infinite / Arc mode toggle in the viewport's top-right corner.
+        ".easel-mode-toggle"
     ].join(",");
 
     const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
@@ -100,6 +101,10 @@
             this._activeIds = new Set();      // drawn on the active canvas, skipped by static
             this._hiddenId = null;            // skipped by both: the textarea is showing it
             this._marquee = null;             // screen-space rect
+            // The switch from infinite to Arc mode is a gesture: the user drags the area
+            // that becomes the top of the page. Armed by the mode toggle; the frame itself
+            // lives on the drag as a world rect, and the overlay projects it each frame.
+            this._picking = false;
 
             // What the pointer is resting on: the object under it, and which control of
             // that object's floating bar, if any. Drives both the accent glow on the
@@ -244,6 +249,7 @@
             this._redo = [];
             this._activeIds.clear();
             this._marquee = null;
+            this.cancelFramePick();
             if (this.host.textEditor) this.host.textEditor.destroy();
 
             this.view = doc ? doc.viewport : { panX: 0, panY: 0, zoom: 1 };
@@ -292,6 +298,8 @@
                 }
             }
             this._paintViewport();
+            // The mode toggle reads the open board, so it is told the board changed.
+            this.host.tools?.syncMode();
         }
 
         get objects() { return this.doc ? this.doc.objects : []; }
@@ -521,6 +529,8 @@
             // dragged by nothing.
             if (this._drag && !this._drag.fromChrome) return false;
             if (this.host.textEditor && this.host.textEditor.isEditing) return false;
+            // Picking the Arc-mode page: the pointer is drawing a frame, not choosing a card.
+            if (this._picking) return false;
             return true;
         }
 
@@ -666,9 +676,14 @@
         // predates headings gets one the first time it is opened.
         _ensureTitleHeading(doc) {
             const Objects = this.Objects;
-            // Measured against the page this board actually has: in verticallyScrolling
-            // that is the window, not the 3600-unit sheet.
+            // Measured against the window, which is the page in Arc mode and the only
+            // width an infinite board has to centre on. An unmeasured viewport (a board
+            // opened in a collapsed browser) is 0, and a heading centred on that would be
+            // a zero-width box at the origin, kept for good because titleObjectId would
+            // then be settled. Leaving the id unset instead defers the heading to the next
+            // open; the caller's deferred startEditing is a no-op for an undefined id.
             const pageWidth = this._pageWidth();
+            if (!pageWidth) return;
             const width = Math.round(pageWidth * 0.6);
             const size = Objects.TEXT_STYLE_BY_KEY.get(Objects.TITLE_STYLE).size;
 
@@ -1047,15 +1062,24 @@
 
             const hover = this._hoverOverlay(toScreenBox);
 
+            // picking dims the whole board before a frame exists; pickFrame is the hole in
+            // it. Projected from the drag's world rect here rather than kept in screen
+            // space, so a wheel zoom mid-drag cannot leave it a frame behind.
+            const picking = this._picking;
+            const drag = this._drag;
+            const pickFrame = drag && drag.mode === "pick-frame" && drag.box
+                ? toScreenBox(drag.box) : null;
+
             if (!selected.length) {
                 return {
                     marquee: this._marquee, selection: [], frame: null,
-                    editing, guides, rotation: 0, hover
+                    editing, guides, rotation: 0, hover, picking, pickFrame
                 };
             }
 
             return {
                 marquee: this._marquee,
+                picking, pickFrame,
                 selection: selected.map(obj => toScreenBox(this.Objects.bounds(obj))),
                 frame: toScreenBox(this.Objects.unionBounds(selected)),
                 editing,
@@ -1267,49 +1291,143 @@
 
         /* ---------------------------------------------------------- canvas mode */
 
-        // Arc's CanvasMode is verticallyScrolling or fixed. In verticallyScrolling the
-        // document has no intrinsic width at all: canvasWidth is the width of the view, and
-        // the board is relaid out whenever that changes — which is why Arc keeps
+        // Two modes, per easel, toggled from the button in the viewport's top-right corner.
+        //
+        // "verticallyScrolling" is Arc mode, Arc's own CanvasMode: the document has no
+        // intrinsic width at all — canvasWidth is the width of the view, the top edge is
+        // y = 0, you scroll down and never up or sideways, and the board is relaid out
+        // whenever the window's width changes. That is why Arc keeps
         // lastLaidOutAtCanvasWidth and documentHeightAsFactorOfWidth on the controller.
         //
-        // This mod's own model is the fixed one: a 3600-unit page, with fit-width as the
-        // zoom-out limit. At fit-width the two look the same, and they part company as soon
-        // as you resize the window — so the mode is per easel and either one is a click
-        // away in the board menu.
+        // "infinite" is the Excalidraw model: an unbounded plane with no clamp on the view
+        // beyond the zoom range. Leaving Arc mode for it moves nothing; coming back is a
+        // gesture, because a plane has no top-left of its own — the user drags the area
+        // that becomes the top of the page (see beginFramePick / applyFrame).
         //
-        // New easels start in verticallyScrolling: a board that is exactly the window is
-        // what someone opening a blank easel expects, and the fixed sheet only earns its
-        // keep once there is enough on the board to want a page wider than the view.
-        // Boards saved before this default changed keep whatever they have on disk.
+        // New easels start in Arc mode: a board that is exactly the window is what someone
+        // opening a blank easel expects. The retired "fixed" sheet opens as infinite — see
+        // the store's hydration.
         get canvasMode() {
-            if (!this.doc || !this.doc.canvasMode) return this.Objects.DEFAULT_CANVAS_MODE;
-            return this.doc.canvasMode === "verticallyScrolling"
-                ? "verticallyScrolling" : "fixed";
+            return this.doc && this.doc.canvasMode === "infinite"
+                ? "infinite" : "verticallyScrolling";
         }
 
+        get infinite() {
+            return this.canvasMode === "infinite";
+        }
+
+        // Whether the frame pick is armed. Read by the toolbar for the toggle's face.
+        get picking() {
+            return this._picking;
+        }
+
+        // Whether a change of window width relays the board out. Only Arc mode does.
         get reflowing() {
-            return this.canvasMode === "verticallyScrolling";
+            return !this.infinite;
         }
 
-        setCanvasMode(mode) {
+        // The toggle's action. From Arc mode it is one step; from infinite it arms the
+        // frame pick, and a second press while armed is a cancel. Focus comes back to the
+        // board in every case, as it does from a toolbar button: left on the toggle,
+        // handleKeyDown declines every key but Escape, so the shortcuts go dead and Space
+        // re-clicks the toggle instead of arming a pan.
+        toggleCanvasMode() {
             if (!this.doc) return;
-            const previous = this.canvasMode;
-            const next = mode === "verticallyScrolling" ? "verticallyScrolling" : "fixed";
-            if (previous === next) return;
+            if (this._picking) this.cancelFramePick();
+            else if (this.infinite) this.beginFramePick();
+            else this.setInfinite();
+            this.root.focus({ preventScroll: true });
+        }
 
-            this.doc.canvasMode = next;
-            // Entering the mode adopts the current width as the layout width, so nothing
-            // moves at the moment of the switch — only later resizes reflow.
-            this.doc.lastLaidOutAtCanvasWidth = this.renderer.width || null;
+        // Nothing moves: the view stays where it is and only the clamp lets go.
+        setInfinite() {
+            if (!this.doc || this.infinite) return;
+            this.doc.canvasMode = "infinite";
             this._clampView();
             this._paintViewport();
+            this._touch();
+            this.host.tools?.syncMode();
+        }
+
+        // Arms the frame pick. The resets mirror a pointer-down on the board, because the
+        // gesture that follows is one — an open editor would otherwise stay up through the
+        // pick, and an activated tile owns the pointer so a press over it would never reach
+        // the canvas. Hover needs no refresh here: _hoverActive withholds it for as long as
+        // the pick is up, and cancelFramePick re-derives it when the pick ends.
+        beginFramePick() {
+            if (!this.doc || !this.infinite || this._picking) return;
+            if (this.host.textEditor?.isEditing) this.stopEditing();
+            if (this.host.live?.activeId) this.host.live.deactivate();
+            this.clearSelection();
+
+            this._picking = true;
+            this.root.dataset.picking = "1";
+            this.host.tools?.syncMode();
+            this.invalidateOverlay();
+        }
+
+        // Safe to call when nothing is armed: setDocument and _cancelDrag do.
+        cancelFramePick() {
+            if (!this._picking) return;
+            this._picking = false;
+            delete this.root.dataset.picking;
+            this.refreshHover();
+            this.host.tools?.syncMode();
+            this.invalidateOverlay();
+        }
+
+        // The switch to Arc mode. `box` is the world rect the user framed; its top-left
+        // becomes the page's origin and its width becomes the window's, so what was framed
+        // is exactly what the window shows afterwards. Objects left of or above the frame
+        // end up at negative coordinates: kept, still selected by select-all and Tab and
+        // still in an export, but the page clamp holds them off screen until the board
+        // goes infinite again.
+        applyFrame(box) {
+            if (!this.doc || !box || !(box.w > 0)) return;
+            // A slider drag holds a mutation open against the pre-frame snapshot.
+            this.endOpacityDrag();
+
+            for (const obj of this.doc.objects) {
+                obj.x -= box.x;
+                obj.y -= box.y;
+                if (obj.type === "ink") {
+                    for (const point of obj.ink.points) {
+                        point[0] -= box.x;
+                        point[1] -= box.y;
+                    }
+                }
+            }
+
+            // The frame's width is declared as the width the board was last laid out at,
+            // and the ordinary reflow does the rest: it scales every object, stroke and
+            // font by width / box.w, remeasures text and drops the ink cache. When the
+            // frame already is the window at 100% the factor is 1 and it early-outs
+            // without remeasuring — harmless: a translation changes no text height, the
+            // ink bitmap is origin-relative, and documentHeightAsFactorOfWidth is only
+            // ever written.
+            this.doc.canvasMode = "verticallyScrolling";
+            this.doc.lastLaidOutAtCanvasWidth = box.w;
+            this._reflowToCanvasWidth();
+
+            // Undo entries are whole-object snapshots re-applied by id, so one taken
+            // before this would put objects back at pre-frame coordinates — a teleport,
+            // not an undo. The stack is dropped, as it is when a board is opened.
+            this._undo = [];
+            this._redo = [];
+
+            this.view.panX = 0;
+            this.view.panY = 0;
+            this.view.zoom = 1;
+            this._clampView();
+            this.cancelFramePick();
+            this.invalidate();
             this._touch();
         }
 
         // The whole of the reflow: scale every object by how much the width changed, then
         // remember the new width. Arc's field names are the design — currentWidth against
         // lastLaidOutAtCanvasWidth — and coordinates stay in the units they were written
-        // in, so nothing has to be migrated and the fixed mode is untouched.
+        // in, so nothing has to be migrated.
         // Answers whether it rescaled anything, because its caller has to know whether the
         // pixels already on the canvas are still the right ones.
         _reflowToCanvasWidth() {
@@ -1483,21 +1601,20 @@
         // Keeps the world point under (screenX, screenY) fixed across the scale change.
         // Zooming about the viewport centre instead is the classic bug — the canvas
         // appears to slide away from the pointer.
-        // Zooming out stops at fit-width. Below that the page would no longer span the
-        // window and you would be looking at a document floating in a void, which is
-        // exactly what a PDF viewer refuses to do.
+        // In Arc mode zooming out stops at fit-width. Below that the page would no longer
+        // span the window and you would be looking at a document floating in a void,
+        // which is exactly what a PDF viewer refuses to do — and since the page is the
+        // window, fit-width is 1 by definition. An infinite board has no such floor.
         _minZoom() {
-            const width = this.renderer.width;
-            // In verticallyScrolling the page is the window, so fit-width is 1 by
-            // definition — there is no width to divide by.
-            if (this.reflowing) return 1;
-            return width ? Math.max(width / PAGE_WIDTH, 0.05) : MIN_ZOOM;
+            return this.infinite ? MIN_ZOOM : 1;
         }
 
-        // The width of the page in world units, which is what the clamp and the grid are
-        // measured against.
+        // The width of the page in world units: the window's, in Arc mode by definition
+        // and for an infinite board as the only width there is to centre a heading on.
+        // Every caller runs after renderer.resize(), so 0 here means an unmeasured
+        // viewport rather than a value to guess at.
         _pageWidth() {
-            return this.reflowing ? (this.renderer.width || PAGE_WIDTH) : PAGE_WIDTH;
+            return this.renderer.width || 0;
         }
 
         // How far down the page currently runs: past the lowest object, plus room to
@@ -1520,15 +1637,17 @@
             return bottom;
         }
 
-        // Holds the view inside the page: pinned to both sides, to the top, and to the
-        // current bottom. Because the minimum zoom is fit-width, the page always spans
-        // the window exactly and there is never dead space beside it.
+        // In Arc mode, holds the view inside the page: pinned to both sides, to the top,
+        // and to the current bottom. Because the minimum zoom is fit-width, the page
+        // always spans the window exactly and there is never dead space beside it. An
+        // infinite board is clamped only in zoom.
         _clampView() {
             const width = this.renderer.width;
             const height = this.renderer.height;
             if (!width || !height) return;
 
             this.view.zoom = clamp(this.view.zoom, this._minZoom(), MAX_ZOOM);
+            if (this.infinite) return;
 
             const pageWidth = this._pageWidth() * this.view.zoom;
             this.view.panX = clamp(this.view.panX, Math.min(0, width - pageWidth), 0);
@@ -1907,7 +2026,17 @@
             }
             if (e.button !== 0) return;
 
+            // Before the pick below as well: the toolbar stays live during a pick, so its
+            // text button can have opened an editor since the pick was armed, and applying
+            // a frame under an open textarea would move the object out from under it.
             if (this.host.textEditor.isEditing) this.stopEditing();
+
+            // Framing the Arc-mode page takes the press whatever tool is armed; only the
+            // pan above outranks it, so the board can still be moved to frame the right part.
+            if (this._picking) {
+                this._startDrag({ mode: "pick-frame", world, screen }, e);
+                return;
+            }
 
             const handle = this._handleAt(screen);
             if (handle) {
@@ -2193,16 +2322,21 @@
                 case "pan":
                     this.view.panX = drag.startPan.x + (screen.x - drag.screen.x);
                     this.view.panY = drag.startPan.y + (screen.y - drag.screen.y);
-                    // The board is a fixed-width page, so a pan must not be able to
+                    // In Arc mode the board is a page, so a pan must not be able to
                     // scroll past its edges. Zooming clamps, and so does a resize, but
                     // the drag itself never did — which is what let a middle-drag walk
                     // sideways off the page and made a bounded board look infinite.
+                    // (On an infinite board the clamp only holds the zoom.)
                     this._clampView();
                     this._paintViewport();
                     break;
 
                 case "marquee":
                     this._updateMarquee(drag, world);
+                    break;
+
+                case "pick-frame":
+                    this._updateFramePick(drag, world);
                     break;
 
                 case "move":
@@ -2246,6 +2380,37 @@
                 if (this.Objects.intersects(this.Objects.bounds(obj), box)) this.selection.add(obj.id);
             }
             this._paint();
+        }
+
+        // The frame's width is what the user is choosing; its height is the window's
+        // proportion of that width, in whichever direction the pointer went, so the box
+        // on screen is exactly the view the page will open on. World units, kept on the
+        // drag: pointer-up applies it and _overlayState projects it to the screen.
+        _frameFromDrag(drag, world) {
+            const width = this.renderer.width;
+            const height = this.renderer.height;
+            const w = Math.abs(world.x - drag.world.x);
+            const h = width ? w * height / width : w;
+            return {
+                x: Math.min(drag.world.x, world.x),
+                y: world.y < drag.world.y ? drag.world.y - h : drag.world.y,
+                w, h
+            };
+        }
+
+        _updateFramePick(drag, world) {
+            drag.box = this._frameFromDrag(drag, world);
+            this._paint();
+        }
+
+        // A press with no real drag means "this view": the window, in world units.
+        _viewportFrame() {
+            const tl = this.toWorld(0, 0);
+            return {
+                x: tl.x, y: tl.y,
+                w: this.renderer.width / this.view.zoom,
+                h: this.renderer.height / this.view.zoom
+            };
         }
 
         _updateMove(drag, world, e) {
@@ -2492,6 +2657,12 @@
                     this._marquee = null;
                     this._paint();
                     break;
+
+                case "pick-frame": {
+                    const framed = drag.box && drag.box.w * this.view.zoom >= FRAME_MIN_PX;
+                    this.applyFrame(framed ? drag.box : this._viewportFrame());
+                    break;
+                }
 
                 case "move":
                 case "resize":
@@ -2788,6 +2959,10 @@
                 this._cancelDrag();
                 return true;
             }
+            if (this._picking) {
+                this.cancelFramePick();
+                return true;
+            }
             // Stepping out of a live card comes first: while one is active the pointer
             // belongs to a website, and getting back out is the most urgent thing Escape
             // can do.
@@ -2812,7 +2987,9 @@
             this._drag = null;
             this._marquee = null;
 
-            if (drag.mode === "draw-shape" || drag.mode === "draw-ink") {
+            // One Escape ends the whole pick, not just the frame being dragged.
+            if (drag.mode === "pick-frame") this.cancelFramePick();
+            else if (drag.mode === "draw-shape" || drag.mode === "draw-ink") {
                 this.doc.objects = this.objects.filter(o => o.id !== drag.id);
             } else if (drag.mode === "move" || drag.mode === "resize" || drag.mode === "rotate") {
                 for (const original of drag.originals) {

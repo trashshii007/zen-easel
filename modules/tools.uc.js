@@ -22,7 +22,10 @@
         line: '<path d="M4.5 19.5 L19.5 4.5" fill="none" stroke-width="1.8" stroke-linecap="round"/>',
         arrow: '<path d="M4.5 19.5 L19.5 4.5 M19.5 4.5 L12.5 5.5 M19.5 4.5 L18.5 11.5" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>',
         pen: '<path d="M4 20 L4.8 16.2 L15.5 5.5 L18.5 8.5 L7.8 19.2 Z M14 7 L17 10" fill="none" stroke-width="1.8" stroke-linejoin="round"/>',
-        image: '<rect x="3.5" y="5.5" width="17" height="13" rx="2" fill="none" stroke-width="1.8"/><circle cx="8.5" cy="10" r="1.6"/><path d="M4.5 17.5 L9.5 12.5 L13 15.5 L16 13 L19.5 16.5" fill="none" stroke-width="1.8" stroke-linejoin="round"/>'
+        image: '<rect x="3.5" y="5.5" width="17" height="13" rx="2" fill="none" stroke-width="1.8"/><circle cx="8.5" cy="10" r="1.6"/><path d="M4.5 17.5 L9.5 12.5 L13 15.5 L16 13 L19.5 16.5" fill="none" stroke-width="1.8" stroke-linejoin="round"/>',
+        // The two faces of the mode toggle: the plane you are on, and the page you would go to.
+        infinite: '<path d="M12 12 C9.5 8.5 4 8.5 4 12 C4 15.5 9.5 15.5 12 12 C14.5 8.5 20 8.5 20 12 C20 15.5 14.5 15.5 12 12 Z" fill="none" stroke-width="1.8" stroke-linejoin="round"/>',
+        page: '<rect x="5.5" y="3.5" width="13" height="17" rx="2" fill="none" stroke-width="1.8"/><path d="M12 8 V16 M9 13 L12 16 L15 13" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>'
     };
 
     // Order follows Arc's own easel toolbar: pointer, image, text, then shapes, then
@@ -66,10 +69,8 @@
             // Whether a newly drawn shape is a solid block or an outline. Set from the
             // floating shape controls, the way fontSize is set from the text ones.
             this.shapeFilled = false;
-            // Arc's Body size. A text box on a 3600px-wide board at fit-width zoom is
-            // being read at roughly half size, so the old 24 landed at about 11px on
-            // screen — legible, but nothing like the confident lettering Arc's easels
-            // have.
+            // Arc's Body size. The old 24 was legible, but nothing like the confident
+            // lettering Arc's easels have.
             this.fontSize = 32;
             this.fontFamily = "system";
             // Whether the next text box renders its content as Markdown; set from the text controls like the font.
@@ -115,7 +116,48 @@
                 this._colorButton
             );
 
+            // The infinite / Arc mode toggle, in the viewport's top-right corner rather
+            // than in this strip: it is about the board, not about the next mark, and it
+            // has to stay put when the topbar is hidden. render() can run again, so any
+            // earlier button goes first.
+            const viewport = this.host.viewport;
+            viewport.querySelector(".easel-mode-toggle")?.remove();
+            this._modeToggle = this.el("button", {
+                className: "easel-mode-toggle",
+                type: "button",
+                onclick: e => { e.stopPropagation(); this.host.canvas.toggleCanvasMode(); }
+            });
+            viewport.appendChild(this._modeToggle);
+            // A fresh button knows nothing; the compare in syncMode must not skip it.
+            this._modeState = null;
+
             this._syncActive();
+            this.syncMode();
+        }
+
+        // The toggle shows the mode you would go to, and while the frame pick is armed it
+        // becomes the cancel. Called by the canvas whenever the mode or the pick changes,
+        // and on every board open.
+        syncMode() {
+            const button = this._modeToggle;
+            const canvas = this.host.canvas;
+            if (!button || !canvas) return;
+
+            const picking = canvas.picking;
+            const infinite = canvas.infinite;
+            const state = picking ? "picking" : infinite ? "infinite" : "arc";
+            if (state === this._modeState) return;
+            this._modeState = state;
+
+            button.replaceChildren(this._icon(ICONS[infinite ? "page" : "infinite"]));
+            button.title = picking
+                ? "Cancel (Esc)"
+                : infinite
+                    ? "Arc mode — drag the area to keep at the top of the board, or click for the current view"
+                    : "Infinite canvas";
+            button.classList.toggle("is-infinite", infinite);
+            button.classList.toggle("is-picking", picking);
+            button.setAttribute("aria-pressed", infinite ? "true" : "false");
         }
 
         // Colour and stroke width together: both describe the next mark, and keeping
@@ -632,18 +674,8 @@
                     action: anchor => this._openBackgroundPanel(anchor)
                 });
                 items.push({ separator: true });
-                // Arc's CanvasMode, per board. On by default — see the note in
-                // canvas.uc.js. Named for what it does rather than for the mechanism:
-                // "Reflow with the window" described the implementation and left the
-                // choice unreadable, which is most of why the mode went unused.
-                items.push({
-                    label: "Fit the board to the window",
-                    checked: canvas.reflowing,
-                    action: () => canvas.setCanvasMode(
-                        canvas.reflowing ? "fixed" : "verticallyScrolling"
-                    )
-                });
-                items.push({ separator: true });
+                // No canvas-mode item: Arc mode always fits the board to the window now, and
+                // the infinite canvas is the toggle in the viewport's top-right corner.
                 items.push({ label: "Zoom to fit", hint: "Ctrl+1", action: () => canvas.zoomToFit() });
                 items.push({ label: "Reset zoom", hint: "Ctrl+0", action: () => canvas.resetZoom() });
                 items.push({ separator: true });

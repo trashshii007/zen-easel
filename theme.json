@@ -4,7 +4,7 @@
   "description": "A local-only port of Arc's Easel. An infinite canvas for web captures, text, shapes and ink, living at about:easel — stored as plain JSON and PNG inside your Zen profile. No accounts, no sync, no network.",
   "author": "imthi",
   "homepage": "https://github.com/trashshii007/zen-easel",
-  "version": "0.4.2",
+  "version": "0.5.1",
   "createdAt": "2026-08-13",
   "updatedAt": "2026-09-17",
   "ai": "no",
