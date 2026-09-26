@@ -13,7 +13,8 @@ An infinite canvas at `about:easel` for screenshots, web pages, text, drawings, 
 - Screenshot capture
 - Live web cards
 - Embedded web tiles
-- Pen, shapes, text, and images
+- Pen, shapes, text, and images (including SVG)
+- Video and audio files, played on the board; any other file as a card — PDFs open in Glance, the rest in their default app (attached up to 25 MB, linked by path beyond that)
 - Export as PNG or JPEG
 - Local storage
 

@@ -369,6 +369,11 @@
         shape: { w: 160, h: 120 },
         ink: { w: 0, h: 0 },
         image: { w: 320, h: 200 },
+        // The audio card. A video is never created at this size — it passes its own,
+        // fitted from the file's frame — so the one default is the one with no frame.
+        media: { w: 320, h: 64 },
+        // The file card: a glyph and a name, one row.
+        file: { w: 260, h: 72 },
         webcard: { w: 400, h: 260 },
         // Wider than a card: this one is a page being read, not a clipping being shown.
         webBrowser: { w: 560, h: 400 }
@@ -592,7 +597,7 @@
     // apart is how the hole reopens, so there is exactly one definition, and it lives
     // in an ES module because that is the only form both a window script and a
     // background module can reach.
-    const { isSafeId, isSafeAssetName, safeExternalUrl, safeFaviconUrl } =
+    const { isSafeId, isSafeAssetName, assetKind, safeExternalUrl, safeFaviconUrl, safeLocalPath, linkedKind } =
         ChromeUtils.importESModule("chrome://sine/content/zen-easel/background/validate.sys.mjs");
 
     /* ------------------------------------------------------------- embedding */
@@ -719,6 +724,12 @@
     // Generous on purpose: a long note and a dense ink stroke both stay well inside these.
     const MAX_TEXT_LENGTH = 100_000;
     const MAX_INK_POINTS = 100_000;
+    // A media or file card's title is the file's own name, drawn on one line.
+    const MAX_TITLE_LENGTH = 200;
+
+    // A title is data from a hand-editable file: coerced to a bounded string, and only
+    // ever drawn with fillText or set as textContent by its consumers.
+    const cleanTitle = value => (typeof value === "string" ? value : "").slice(0, MAX_TITLE_LENGTH);
 
     // Documents are read back from disk that a future version may have written, or
     // that a crash may have truncated. Anything that survives JSON.parse is coerced
@@ -727,7 +738,7 @@
     function sanitize(obj, legacyPalette) {
         if (!obj || typeof obj !== "object") return null;
         if (!obj.id || typeof obj.id !== "string") return null;
-        if (!["text", "shape", "ink", "image", "webcard", "webBrowser"].includes(obj.type)) return null;
+        if (!["text", "shape", "ink", "image", "media", "file", "webcard", "webBrowser"].includes(obj.type)) return null;
 
         const num = (v, fallback) => (typeof v === "number" && Number.isFinite(v) ? v : fallback);
         obj.x = num(obj.x, 0);
@@ -801,10 +812,53 @@
             // An asset name that is not a plain filename is dropped rather than
             // corrected: there is no benign way for one to contain a path separator,
             // so the only thing a repair would achieve is loading whatever it points at.
-            if (!isSafeAssetName(obj.image.asset)) return null;
+            // assetKind covers isSafeAssetName and adds the kind: the name test alone
+            // would let an image object name a video, which an <img> cannot show.
+            if (assetKind(obj.image.asset) !== "image") return null;
+        } else if (obj.type === "media") {
+            // A video or audio file. Which of the two is never stored — the extension
+            // says, through assetKind, so a hand-edited record cannot disagree with the
+            // file it names.
+            // Attached (a copy in the board's assets) or, over the attach limit, linked: the
+            // original's path, played in place and never copied or swept.
+            if (!obj.media || typeof obj.media !== "object") return null;
+            const kind = assetKind(obj.media.asset);
+            if (kind === "video" || kind === "audio") {
+                delete obj.media.path;
+                delete obj.media.size;
+            } else {
+                const linked = linkedKind(obj.media.path);
+                if (linked !== "video" && linked !== "audio") return null;
+                obj.media.path = safeLocalPath(obj.media.path);
+                delete obj.media.asset;
+                obj.media.size = typeof obj.media.size === "number" && Number.isFinite(obj.media.size) &&
+                    obj.media.size >= 0 ? obj.media.size : 0;
+            }
+            obj.media.title = cleanTitle(obj.media.title);
+        } else if (obj.type === "file") {
+            // Any file, shown as a card and opened outside the board. Attached: a copy in
+            // the board's assets, under any safe name — a video that would not decode is
+            // attached under its own .mov, so the kind is deliberately not checked. Linked:
+            // an absolute local path, never copied and never swept.
+            if (!obj.file || typeof obj.file !== "object") return null;
+            if (isSafeAssetName(obj.file.asset)) {
+                delete obj.file.path;
+                delete obj.file.size;
+            } else {
+                const path = safeLocalPath(obj.file.path);
+                if (!path) return null;
+                obj.file.path = path;
+                delete obj.file.asset;
+                obj.file.size = typeof obj.file.size === "number" && Number.isFinite(obj.file.size) &&
+                    obj.file.size >= 0 ? obj.file.size : 0;
+            }
+            obj.file.title = cleanTitle(obj.file.title);
         } else if (obj.type === "webcard") {
             if (!obj.webcard || typeof obj.webcard !== "object") return null;
-            if (!isSafeAssetName(obj.webcard.asset)) obj.webcard.asset = "";
+            // The kind test as well as the name test, for the same reason as an image:
+            // the screenshot is drawn as one, and a card pointed at a .mp4 would be a
+            // card that never shows.
+            if (assetKind(obj.webcard.asset) !== "image") obj.webcard.asset = "";
             // Store the canonical spec, so what is on disk is already normalised and
             // gets re-validated on every load.
             obj.webcard.url = safeExternalUrl(obj.webcard.url) || "";
@@ -841,10 +895,10 @@
             // webcard's asset it is not what the object *is* — a tile with no poster is
             // still a tile, so a bad name is cleared rather than rejecting the object.
             //
-            // Gated on the same name test every other asset goes through: it is
+            // Gated on the same name-and-kind test every other asset goes through: it is
             // interpolated into a file path under the easel's own assets directory, and a
             // board file is hand-editable.
-            if (!isSafeAssetName(obj.webBrowser.poster)) obj.webBrowser.poster = "";
+            if (assetKind(obj.webBrowser.poster) !== "image") obj.webBrowser.poster = "";
             // Set when the user took the poster deliberately, with the refresh button. An
             // automatic capture will not overwrite one of these — which is the whole point,
             // since an automatic capture cannot tell a logged-in page from a login wall. It
@@ -860,6 +914,34 @@
 
         return obj;
     }
+
+    // The file card's glyph label: the real name's extension, which the title keeps for
+    // both shapes (an attached asset is a uuid, and an extensionless file is stored .bin).
+    function fileBadge(obj) {
+        const title = String(obj?.file?.title || "");
+        const dot = title.lastIndexOf(".");
+        const ext = dot > 0 ? title.slice(dot + 1) : "";
+        return /^[A-Za-z0-9]{1,4}$/.test(ext) ? ext.toUpperCase() : "FILE";
+    }
+
+    // The real name's extension, lower-cased, for the OS file-type icon; "" when there is none usable.
+    function fileExtension(obj) {
+        const title = String(obj?.file?.title || "");
+        const dot = title.lastIndexOf(".");
+        const ext = dot > 0 ? title.slice(dot + 1).toLowerCase() : "";
+        return /^[a-z0-9]{1,16}$/.test(ext) ? ext : "";
+    }
+
+    const isFileLinked = obj => !!(obj && obj.type === "file" && obj.file && obj.file.path);
+
+    // "video" or "audio" for a media object, from its asset or its linked path.
+    function mediaKindOf(obj) {
+        if (!obj || obj.type !== "media" || !obj.media) return null;
+        return obj.media.path ? linkedKind(obj.media.path) : assetKind(obj.media.asset);
+    }
+
+    // The original a linked card or media object points at, or null.
+    const linkedPath = obj => (obj && (obj.type === "file" ? obj.file?.path : obj.type === "media" ? obj.media?.path : null)) || null;
 
     window.ZenEaselObjects = {
         STANDARD_ROWS,
@@ -907,7 +989,14 @@
         youtubeEmbedUrl,
         isSafeId,
         isSafeAssetName,
+        assetKind,
         safeExternalUrl,
+        safeLocalPath,
+        fileBadge,
+        fileExtension,
+        isFileLinked,
+        mediaKindOf,
+        linkedPath,
         sanitize
     };
 })();

@@ -15,23 +15,94 @@
 // asset written on that path.
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
-// gif and avif are here because earlier versions accepted any image/* drop and wrote it
-// under its own extension — omitting them would make every such object vanish on the
-// next load. They are raster formats and decode inertly. svg is the one deliberate
-// omission: it is a scriptable document format, and these names end up in
-// createObjectURL and then in an <img>.
-const ASSET_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.(png|jpe?g|webp|gif|avif)$/i;
+// Four kinds of asset, decided by the extension the store files it under. Which kind a
+// name is decides how it may be used — an <img>, a <video>/<audio>, or a card that is
+// opened outside the board — and assetKind() below is the only reader of these sets.
+// Since 0.7.0 any extension is storable: whatever is not an image, video or audio is a
+// "file", which the page never loads and only the host opens.
+//
+// gif and avif are in the image set because earlier versions accepted any image/* drop
+// and wrote it under its own extension — omitting them would make every such object
+// vanish on the next load. svg is accepted since 0.6.0 on two conditions that the page
+// side enforces: it is sanitised on ingest (scripts, event handlers, foreignObject and
+// external references stripped, an absolute size written on the root), and it is only
+// ever loaded as an image, where a script could not run anyway.
+const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp", "gif", "avif", "svg", "bmp", "ico"]);
+// mov and mkv are listed because Firefox often decodes them; ingest probes every video, so one that does not decode never becomes a media object.
+const VIDEO_EXTENSIONS = new Set(["mp4", "m4v", "webm", "ogv", "mov", "mkv"]);
+const AUDIO_EXTENSIONS = new Set(["mp3", "wav", "ogg", "oga", "opus", "flac", "m4a", "aac", "weba"]);
 
-export const ASSET_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp", "gif", "avif"]);
+const EXTENSION_RE = /^[a-z0-9]{1,16}$/;
+
+const ASSET_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.[a-z0-9]{1,16}$/i;
+
+// A Windows device name opens the device whatever extension follows it, so nul.txt is not a file.
+const DEVICE_NAME_RE = /^(con|prn|aux|nul|com\d|lpt\d)(\.|$)/i;
 
 const MAX_URL_LENGTH = 4096;
+const MAX_PATH_LENGTH = 4096;
 
 export function isSafeId(id) {
     return typeof id === "string" && ID_RE.test(id);
 }
 
 export function isSafeAssetName(name) {
-    return typeof name === "string" && ASSET_NAME_RE.test(name) && !name.includes("..");
+    return typeof name === "string" && ASSET_NAME_RE.test(name) && !name.includes("..") &&
+        !DEVICE_NAME_RE.test(name);
+}
+
+// Which of the four kinds an asset name is, or null. Every place that decides what an
+// asset may be used as — the object sanitizer, the renderer, the media layer, the host
+// opening a file — asks this rather than reading the extension itself, so a name that
+// passes isSafeAssetName can still be refused where it does not belong: an image object
+// naming a video, a card's screenshot naming a PDF.
+export function assetKind(name) {
+    if (!isSafeAssetName(name)) return null;
+    return extensionKind(name.slice(name.lastIndexOf(".") + 1));
+}
+
+// The same decision for a linked file's path, which is not an asset name: null unless the
+// path passes safeLocalPath and its file name has an extension.
+export function linkedKind(path) {
+    const safe = safeLocalPath(path);
+    if (!safe) return null;
+    const leaf = safe.slice(Math.max(safe.lastIndexOf("\\"), safe.lastIndexOf("/")) + 1);
+    const dot = leaf.lastIndexOf(".");
+    return dot > 0 ? extensionKind(leaf.slice(dot + 1)) : null;
+}
+
+function extensionKind(extension) {
+    const ext = String(extension).toLowerCase();
+    if (IMAGE_EXTENSIONS.has(ext)) return "image";
+    if (VIDEO_EXTENSIONS.has(ext)) return "video";
+    if (AUDIO_EXTENSIONS.has(ext)) return "audio";
+    return "file";
+}
+
+// A linked file card's path, normalised, or null. The one stored filesystem path on a
+// board, and it comes from a hand-editable file that a click will hand to the OS — so
+// this is an allow-list of plain local paths rather than a list of bad prefixes. On
+// Windows: a drive letter, no UNC or device namespace (Windows reads / as \, so /\host
+// is UNC too), no second colon (an alternate data stream), and no segment ending in a
+// dot or space, which Windows strips — letting what isExecutable() sees differ from
+// what runs. Applied by the page sanitizer, the page's open path and the host.
+export function safeLocalPath(raw) {
+    if (typeof raw !== "string" || !raw || raw.length > MAX_PATH_LENGTH) return null;
+    if (/[\x00-\x1f\x7f]/.test(raw)) return null;
+    let path = raw;
+    if (Services.appinfo.OS === "WINNT") {
+        path = path.replace(/\//g, "\\");
+        if (!/^[A-Za-z]:\\/.test(path)) return null;
+        if (path.indexOf(":", 2) !== -1) return null;
+        if (path.split("\\").some(segment => /[. ]$/.test(segment))) return null;
+    } else if (!/^\/(?!\/)/.test(path)) {
+        return null;
+    }
+    try {
+        return PathUtils.normalize(path);
+    } catch (e) {
+        return null;
+    }
 }
 
 // The single gate every stored URL passes through, on the way in and on the way out.
@@ -89,8 +160,9 @@ export function safeFaviconUrl(value) {
 }
 
 // Coerces a caller-supplied extension hint (a MIME subtype or a filename suffix) to one
-// the store will keep.
+// the store will keep. The fallback is bin, not an image type, so an unknown file is
+// never stored under a name that would be read as a picture.
 export function safeExtension(extension) {
     const ext = String(extension || "").toLowerCase();
-    return ASSET_EXTENSIONS.has(ext) ? ext : "png";
+    return EXTENSION_RE.test(ext) ? ext : "bin";
 }

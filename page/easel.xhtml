@@ -38,12 +38,21 @@
     means no fetch/XHR can be added later without this being edited first, and the absence
     of http:/https: from img-src makes "local favicons only" an engine guarantee rather
     than a filter someone can forget to apply.
+
+    media-src is blob: alone, for the <video> and <audio> elements the media layer builds
+    from the store's object URLs. Those URLs are made from disk-backed Files under the
+    profile, so like img-src this admits nothing that is not already on this machine.
+
+    moz-icon: in img-src is for a file card's glyph: the icon the OS associates with the
+    file's extension, rendered locally by the icon decoder. The renderer only ever asks
+    by extension (moz-icon://.xlsx), never by path, so no file is touched to draw one.
   -->
   <meta http-equiv="Content-Security-Policy"
         content="default-src chrome:;
                  script-src chrome:;
                  style-src chrome: 'unsafe-inline';
-                 img-src chrome: blob: data: page-icon:;
+                 img-src chrome: blob: data: page-icon: moz-icon:;
+                 media-src blob:;
                  connect-src 'none';
                  object-src 'none'"/>
 

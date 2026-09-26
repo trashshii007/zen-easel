@@ -6,7 +6,8 @@
 //   <root>/index.json             { easels: [{ id, title, createdAt, updatedAt, lastOpenedAt }], lastOpened }
 //   <root>/easels/<id>.json       one document: objects + saved viewport
 //   <root>/easels/<id>.thumb.png  card thumbnail for the library
-//   <root>/assets/<id>/<uuid>.png captures and dropped images
+//   <root>/assets/<id>/<uuid>.*   captures, dropped images, video, audio and attached files
+//   <root>/trash/<id>/<uuid>.*    files of deleted objects that undo can still bring back
 //
 // where <root> defaults to zen-easels/ inside the profile.
 //
@@ -78,6 +79,10 @@ class EaselStoreImpl {
 
         // Deletes in flight; flush() waits on these the way it drains _pending.
         this._deletes = new Set();
+
+        // Sweeps and trash restores run one at a time, in call order, so an undo's restore
+        // always lands after a sweep that was already moving the same file to the trash.
+        this._trashChain = Promise.resolve();
     }
 
     /* ---------------------------------------------------------------- paths */
@@ -113,6 +118,11 @@ class EaselStoreImpl {
         return PathUtils.join(this._assetDir(easelId), name);
     }
 
+    _trashDir(easelId) {
+        if (!isSafeId(easelId)) throw new Error(`unsafe easel id: ${easelId}`);
+        return PathUtils.join(this.root, "trash", easelId);
+    }
+
     _indexPath() { return PathUtils.join(this.root, "index.json"); }
 
     /* ----------------------------------------------------------------- init */
@@ -131,6 +141,15 @@ class EaselStoreImpl {
             await IOUtils.makeDirectory(this.root, { createAncestors: true, ignoreExisting: true });
             await IOUtils.makeDirectory(PathUtils.join(this.root, "easels"), { createAncestors: true, ignoreExisting: true });
             await IOUtils.makeDirectory(PathUtils.join(this.root, "assets"), { createAncestors: true, ignoreExisting: true });
+
+            // Undo history does not outlive a process, so trash left by the last one — a quit,
+            // a crash, a window closed with boards open — can never be restored. Nothing in
+            // this process can have written any yet: every sweep awaits this first.
+            try {
+                await IOUtils.remove(PathUtils.join(this.root, "trash"), { recursive: true, ignoreAbsent: true });
+            } catch (e) {
+                console.error("[zen-easel] could not empty the previous session's trash:", e);
+            }
 
             this._index = await this._readIndexFile();
 
@@ -364,7 +383,8 @@ class EaselStoreImpl {
         for (const remove of [
             () => IOUtils.remove(this._easelPath(id), { ignoreAbsent: true }),
             () => IOUtils.remove(this._thumbPath(id), { ignoreAbsent: true }),
-            () => IOUtils.remove(this._assetDir(id), { recursive: true, ignoreAbsent: true })
+            () => IOUtils.remove(this._assetDir(id), { recursive: true, ignoreAbsent: true }),
+            () => IOUtils.remove(this._trashDir(id), { recursive: true, ignoreAbsent: true })
         ]) {
             try { await remove(); } catch (e) { console.error("[zen-easel] delete:", e); }
         }
@@ -454,11 +474,42 @@ class EaselStoreImpl {
         return name;
     }
 
+    // The same as saveAsset for a file that already exists on disk: a copy, so a video
+    // or an attached file never has to be read into memory to be added. Nothing but the
+    // path crosses the seam.
+    async importAsset(easelId, sourcePath, extension) {
+        await this.init();
+        const dir = this._assetDir(easelId);
+        // A dropped folder has a path too, and IOUtils.copy would copy it recursively.
+        const source = await IOUtils.stat(sourcePath);
+        if (source.type !== "regular") throw new Error("Folders can't be added");
+        const name = `${uuid()}.${safeExtension(extension)}`;
+        await IOUtils.makeDirectory(dir, { createAncestors: true, ignoreExisting: true });
+        const dest = PathUtils.join(dir, name);
+        await IOUtils.copy(sourcePath, dest);
+        // A copy keeps the source's modification time on Windows, which the sweep would read as an asset past its grace period.
+        try {
+            await IOUtils.setModificationTime(dest);
+        } catch (e) {
+            console.error("[zen-easel] could not stamp the imported asset:", e);
+        }
+        return name;
+    }
+
     // Returns raw bytes. The caller wraps them in a Blob in its own global immediately,
     // so nothing of this module's escapes into a page beyond the one array.
     async readAsset(easelId, name) {
         await this.init();
         return IOUtils.read(this._assetPath(easelId, name));
+    }
+
+    // The path of an asset, for the page to build a disk-backed File from rather than
+    // reading the bytes, and for the host to open a file card with. Validated by
+    // construction in _assetPath, so a caller cannot name anything outside this easel's
+    // own asset directory.
+    async assetPath(easelId, name) {
+        await this.init();
+        return this._assetPath(easelId, name);
     }
 
     async writeThumbnail(easelId, bytes) {
@@ -479,6 +530,112 @@ class EaselStoreImpl {
     }
 
     /* --------------------------------------------------------------- garbage */
+
+    // A page's sweep of the board it has open, or is letting go of. Every file in the
+    // board's asset directory that neither the saved document nor `keep` (the page's live
+    // board and object clipboard) names is either moved to the board's trash — when it is in
+    // `park`, the names undo or redo could still bring back — or deleted, once older than
+    // `graceMs`. Trash entries no longer in `park` are deleted. A close or a board switch
+    // passes no `park`, which empties the trash: the undo history ends there. Both lists
+    // are copied into Sets first so nothing of the page's is kept.
+    //
+    // Tracked in _deletes on purpose: the shutdown blocker waits for it, and so does the
+    // next board's readDocument (via flush), which costs a board switch a few milliseconds
+    // and must not be "optimised" into an untracked delete. It awaits _drain, not flush,
+    // because flush awaits _deletes and would wait on itself. Resolves to how many ms until
+    // a file it skipped for being too new becomes eligible, or 0.
+    sweepEasel(id, keep = [], { graceMs = 0, park = [] } = {}) {
+        const names = this._safeNames(keep);
+        const parked = this._safeNames(park);
+        for (const name of names) parked.delete(name);
+        const grace = Math.max(0, Number(graceMs) || 0);
+        return this._track(this._onTrashChain(async () => {
+            await this.init();
+            if (!isSafeId(id)) return 0;
+            await this._drain();
+            return (await this._sweepEaselAssets(id, { graceMs: grace, keep: names, park: parked })) || 0;
+        }));
+    }
+
+    // Undo or redo put back objects whose files a sweep had moved to the trash: move them
+    // back. Resolves once they are in place, so the page can load them, to the names that
+    // are in the board's assets afterwards.
+    restoreFromTrash(id, names) {
+        const wanted = this._safeNames(names);
+        return this._onTrashChain(async () => {
+            await this.init();
+            const present = [];
+            if (!isSafeId(id) || !wanted.size) return present;
+            const dir = this._assetDir(id);
+            for (const name of wanted) {
+                try {
+                    const from = PathUtils.join(this._trashDir(id), name);
+                    const to = this._assetPath(id, name);
+                    if (!(await IOUtils.exists(to))) {
+                        if (!(await IOUtils.exists(from))) continue;
+                        await IOUtils.makeDirectory(dir, { createAncestors: true, ignoreExisting: true });
+                        await IOUtils.move(from, to);
+                    }
+                    present.push(name);
+                } catch (e) {
+                    console.error(`[zen-easel] could not restore ${name} from the trash:`, e);
+                }
+            }
+            return present;
+        });
+    }
+
+    // A paste of objects copied on board `fromId` into board `toId`: each file they name is
+    // copied across under the same name (from the source's trash if a sweep parked it
+    // there). On the trash chain, so it follows the source board's let-go sweep, which kept
+    // these for the clipboard, and precedes any sweep of the target. Names are uuids, so a
+    // name already in the target is the same file and is left alone.
+    copyAssets(fromId, toId, names) {
+        const wanted = this._safeNames(names);
+        return this._onTrashChain(async () => {
+            await this.init();
+            if (!isSafeId(fromId) || !isSafeId(toId) || fromId === toId || !wanted.size) return;
+            const dir = this._assetDir(toId);
+            for (const name of wanted) {
+                try {
+                    const to = this._assetPath(toId, name);
+                    if (await IOUtils.exists(to)) continue;
+                    let from = this._assetPath(fromId, name);
+                    if (!(await IOUtils.exists(from))) {
+                        from = PathUtils.join(this._trashDir(fromId), name);
+                        if (!(await IOUtils.exists(from))) continue;
+                    }
+                    await IOUtils.makeDirectory(dir, { createAncestors: true, ignoreExisting: true });
+                    await IOUtils.copy(from, to);
+                    // A copy keeps the source's mtime on Windows; see importAsset.
+                    try { await IOUtils.setModificationTime(to); } catch (e) { }
+                } catch (e) {
+                    console.error(`[zen-easel] could not copy ${name} into ${toId}:`, e);
+                }
+            }
+        });
+    }
+
+    _safeNames(list) {
+        const names = new Set();
+        for (const name of Array.isArray(list) ? list : []) {
+            if (isSafeAssetName(name)) names.add(String(name));
+        }
+        return names;
+    }
+
+    _onTrashChain(run) {
+        const done = this._trashChain.then(run, run);
+        this._trashChain = done.catch(() => { });
+        return done;
+    }
+
+    _track(done) {
+        this._deletes.add(done);
+        const forget = () => this._deletes.delete(done);
+        done.then(forget, forget);
+        return done;
+    }
 
     // Deleting an object, or undoing the creation of one, only ever touched the JSON —
     // the PNG behind it stayed on disk forever. So did every .tmp left by an interrupted
@@ -512,7 +669,10 @@ class EaselStoreImpl {
         const known = new Set(this._index.easels.map(e => e.id));
         const cutoff = Date.now() - ASSET_GRACE_MS;
 
-        for (const path of await IOUtils.getChildren(assetsRoot)) {
+        const trashRoot = PathUtils.join(this.root, "trash");
+        const dirs = await IOUtils.getChildren(assetsRoot);
+        if (await IOUtils.exists(trashRoot)) dirs.push(...await IOUtils.getChildren(trashRoot));
+        for (const path of dirs) {
             const name = PathUtils.filename(path);
             if (known.has(name)) continue;
             // Anything unrecognised is left alone unless it is old enough to be
@@ -526,14 +686,17 @@ class EaselStoreImpl {
         }
     }
 
-    async _sweepEaselAssets(easelId) {
+    // `park` null is the daily sweep: nothing is moved, and trash older than the grace
+    // period — left by a page that never let go cleanly — is deleted.
+    async _sweepEaselAssets(easelId, { graceMs = ASSET_GRACE_MS, keep = null, park = null } = {}) {
         let dir;
         try {
             dir = this._assetDir(easelId);
         } catch (e) {
             return; // unsafe id; _sweepOrphanDirectories deals with the directory
         }
-        if (!(await IOUtils.exists(dir))) return;
+        const trash = this._trashDir(easelId);
+        if (!(await IOUtils.exists(dir)) && !(await IOUtils.exists(trash))) return 0;
 
         let objects;
         try {
@@ -542,33 +705,65 @@ class EaselStoreImpl {
         } catch (e) {
             // Cannot read the document, so cannot know what it references. Deleting on
             // that basis would be destroying data to save space.
-            return;
+            return 0;
         }
 
         // Every field anywhere in the document that names a file in this directory. A
         // field missing from this list is not a leak — it is the opposite, and worse: the
         // sweep would see a file nothing claims and delete something still in use.
-        const used = new Set();
+        const used = new Set(keep || []);
         for (const obj of objects) {
             if (obj && obj.image && obj.image.asset) used.add(obj.image.asset);
+            if (obj && obj.media && obj.media.asset) used.add(obj.media.asset);
+            if (obj && obj.file && obj.file.asset) used.add(obj.file.asset);
             if (obj && obj.webcard && obj.webcard.asset) used.add(obj.webcard.asset);
             // A web tile's poster. Rewritten every time a tile is stopped, so the ones it
             // replaces are exactly what this sweep is for — but only the ones it replaces.
             if (obj && obj.webBrowser && obj.webBrowser.poster) used.add(obj.webBrowser.poster);
         }
 
-        const cutoff = Date.now() - ASSET_GRACE_MS;
-        for (const path of await IOUtils.getChildren(dir)) {
+        const now = Date.now();
+        let retryIn = 0;
+        const children = (await IOUtils.exists(dir)) ? await IOUtils.getChildren(dir) : [];
+        for (const path of children) {
             const name = PathUtils.filename(path);
             if (used.has(name)) continue;
             try {
+                if (park && park.has(name)) {
+                    // Undo can still bring its object back, so it waits in the trash. The
+                    // move keeps the old mtime, which the daily sweep would read as expired.
+                    await IOUtils.makeDirectory(trash, { createAncestors: true, ignoreExisting: true });
+                    const to = PathUtils.join(trash, name);
+                    await IOUtils.move(path, to);
+                    try { await IOUtils.setModificationTime(to); } catch (e) { }
+                    continue;
+                }
                 const stat = await IOUtils.stat(path);
-                // .tmp files from a crashed atomic write are swept on the same grace
-                // period; a live one belongs to a write still in flight.
-                if (stat.lastModified >= cutoff) continue;
+                // .tmp files from a crashed atomic write keep the full grace period whatever
+                // the caller asked for; a live one belongs to a write still in flight.
+                const isTmp = name.endsWith(".tmp");
+                const grace = isTmp ? ASSET_GRACE_MS : graceMs;
+                if (stat.lastModified >= now - grace) {
+                    if (!isTmp) retryIn = Math.max(retryIn, stat.lastModified + grace - now);
+                    continue;
+                }
                 await IOUtils.remove(path, { ignoreAbsent: true });
             } catch (e) { }
         }
+
+        if (await IOUtils.exists(trash)) {
+            for (const path of await IOUtils.getChildren(trash)) {
+                const name = PathUtils.filename(path);
+                // Still undoable, or already back on the board and waiting for its restore.
+                if (park && (park.has(name) || used.has(name))) continue;
+                try {
+                    if (!park && (await IOUtils.stat(path)).lastModified >= now - ASSET_GRACE_MS) continue;
+                    await IOUtils.remove(path, { ignoreAbsent: true });
+                } catch (e) { }
+            }
+            try { await IOUtils.remove(trash, { ignoreAbsent: true }); } catch (e) { }
+        }
+        return retryIn;
     }
 }
 

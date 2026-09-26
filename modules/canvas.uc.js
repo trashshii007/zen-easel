@@ -31,6 +31,8 @@
     const ZOOM_STEP = 1.15;
     const UNDO_LIMIT = 100;
     const HANDLE_TOLERANCE = 3;
+    // A second click on the same file card disc within this long is the other half of a double-click, not a second open.
+    const DOUBLE_CLICK_MS = 500;
     // A frame dragged narrower than this on screen while picking the Arc-mode page is a
     // click, and a click means "the view I am looking at".
     const FRAME_MIN_PX = 12;
@@ -92,8 +94,14 @@
             // Comparing it against what is on the clipboard now is how paste decides whether
             // our objects are still the most recent copy. See copySelection.
             this._clipboardToken = null;
+            // The board _clipboard was copied on: its files live in that board's assets, so a paste elsewhere has to bring them along.
+            this._clipboardEasel = null;
             this._undo = [];
             this._redo = [];
+            // The board's asset names as of the last recorded step; see _push.
+            this._assetSnapshot = new Set();
+            // The last file card disc a click acted on, and when; see _onPointerUp.
+            this._lastDiscClick = null;
 
             this._staticDirty = true;
             this._index = null;               // id -> object; see _byId
@@ -247,6 +255,7 @@
             this.selection.clear();
             this._undo = [];
             this._redo = [];
+            this._assetSnapshot = this._docAssets();
             this._activeIds.clear();
             this._marquee = null;
             this.cancelFramePick();
@@ -257,7 +266,15 @@
             this.renderer.releaseImages();
             // The <img> elements belong to the board being left behind, and the blob
             // URLs behind them are revoked as part of the switch.
-            if (this.host.media) this.host.media.clear();
+            if (this.host.media) {
+                this.host.media.clear();
+                // Playback state is drawn on the overlay, and only for the object whose
+                // controls are showing — so a timeupdate repaints nothing unless that is
+                // the object it came from. The same condition _overlayState draws under.
+                this.host.media.onMediaChange = id => {
+                    if (id === this._hoverId || id === this._soleSelectedId()) this.invalidateOverlay();
+                };
+            }
 
             this.root.classList.toggle("is-empty-document", !doc);
             this.renderer.resize();
@@ -346,6 +363,13 @@
         hasObject(id) { return !!this._byId(id); }
 
         _selected() { return [...this.selection].map(id => this._byId(id)).filter(Boolean); }
+
+        // The one selected object's id, or null for none or several. A media object's
+        // controls show while it is the sole selection, and the media layer asks the
+        // same question to decide whether a playback change is worth a repaint.
+        _soleSelectedId() {
+            return this.selection.size === 1 ? [...this.selection][0] : null;
+        }
 
         _touch() {
             this._syncTitleFromHeading();
@@ -467,7 +491,8 @@
                 const hit = this._hitTest(world.x, world.y);
                 if (hit && hit.id !== activeId) {
                     id = hit.id;
-                    part = this._hitChrome(hit, world) || this._hitMarkdownLink(hit, world);
+                    part = this._hitChrome(hit, world) || this._hitMarkdownLink(hit, world) ||
+                        this._hitMediaControl(hit, world) || this._hitFileControl(hit, world);
                 }
             }
 
@@ -487,11 +512,44 @@
             return this.renderer.markdownLinkAt(obj, point.x - obj.x, point.y - obj.y) ? "mdlink" : null;
         }
 
+        // "mediaplay" when the pointer is on a media object's play/pause glyph. Same
+        // world-space rects the overlay draws the glyph from, hit in the object's local
+        // frame like the card bar, with the same small pad for low zoom.
+        _hitMediaControl(obj, world) {
+            if (obj.type !== "media") return null;
+            const rects = this.renderer.mediaControlRects(obj);
+            if (!rects) return null;
+            const point = this.Objects.toLocal(obj, world.x, world.y);
+            const pad = 4 / this.view.zoom;
+            const g = rects.glyph;
+            return point.x >= g.x - pad && point.x <= g.x + g.w + pad &&
+                point.y >= g.y - pad && point.y <= g.y + g.h + pad ? "mediaplay" : null;
+        }
+
+        // "fileopen" / "filereveal" when the pointer is on one of a file card's discs.
+        _hitFileControl(obj, world) {
+            if (obj.type !== "file") return null;
+            const rects = this.renderer.fileChromeRects(obj);
+            if (!rects) return null;
+            const point = this.Objects.toLocal(obj, world.x, world.y);
+            const pad = 4 / this.view.zoom;
+            const inside = r => r && point.x >= r.x - pad && point.x <= r.x + r.w + pad &&
+                point.y >= r.y - pad && point.y <= r.y + r.h + pad;
+            if (inside(rects.reveal)) return "filereveal";
+            if (inside(rects.open)) return "fileopen";
+            return null;
+        }
+
         // The pointer cursor over a link, derived on the frame rather than written from
         // _applyHoverAt: clearHover, _dismissCardChrome and an editor opening under a
         // resting pointer all change the answer without passing through there.
+        //
+        // The same cursor for the things a single click does something with: a Markdown
+        // link, a media object's play glyph, and a file card's open and folder discs.
         _applyLinkCursor() {
-            const on = this._hoverPart === "mdlink" && this._hoverActive();
+            const clickable = this._hoverPart === "mdlink" || this._hoverPart === "mediaplay" ||
+                this._hoverPart === "fileopen" || this._hoverPart === "filereveal";
+            const on = clickable && this._hoverActive();
             if (on === this._linkCursor) return;
             this._linkCursor = on;
             this.root.toggleAttribute("data-easel-link", on);
@@ -1061,6 +1119,8 @@
             };
 
             const hover = this._hoverOverlay(toScreenBox);
+            const media = this._mediaOverlay(toScreenBox);
+            const file = this._fileOverlay(toScreenBox);
 
             // picking dims the whole board before a frame exists; pickFrame is the hole in
             // it. Projected from the drag's world rect here rather than kept in screen
@@ -1073,7 +1133,7 @@
             if (!selected.length) {
                 return {
                     marquee: this._marquee, selection: [], frame: null,
-                    editing, guides, rotation: 0, hover, picking, pickFrame
+                    editing, guides, rotation: 0, hover, media, file, picking, pickFrame
                 };
             }
 
@@ -1085,7 +1145,53 @@
                 editing,
                 guides,
                 rotation: this._selectionRotation(selected),
-                hover
+                hover,
+                media,
+                file
+            };
+        }
+
+        // The file card disc under the pointer, in screen space, for the overlay to light.
+        _fileOverlay(toScreenBox) {
+            if (!this._hoverActive()) return null;
+            const part = this._hoverPart;
+            if (part !== "fileopen" && part !== "filereveal") return null;
+            const obj = this._byId(this._hoverId);
+            const rects = obj ? this.renderer.fileChromeRects(obj) : null;
+            const rect = rects && (part === "filereveal" ? rects.reveal : rects.open);
+            if (!rect) return null;
+            return {
+                box: toScreenBox(this.Objects.bounds(obj)),
+                rotation: obj.rotation || 0,
+                button: toScreenBox(rect),
+                kind: part === "filereveal" ? "reveal" : "open"
+            };
+        }
+
+        // A media object's controls, in screen space, or null. Shown for the object under
+        // the pointer, or for the one selected object — the same two cases the media
+        // layer's onMediaChange repaints for, so a state change is never drawn late.
+        // Not while a drag or a tool has the pointer, for the reasons _hoverActive gives.
+        _mediaOverlay(toScreenBox) {
+            let id = null;
+            if (this._hoverActive()) id = this._hoverId;
+            if (id === null && !this._drag && !this._picking) id = this._soleSelectedId();
+            const obj = id !== null ? this._byId(id) : null;
+            if (!obj || obj.type !== "media") return null;
+            if (this.host.textEditor && this.host.textEditor.isEditing) return null;
+
+            const rects = this.renderer.mediaControlRects(obj);
+            if (!rects) return null;
+            const media = this.host.media;
+            const progress = media ? media.progress(obj.id) : { current: 0, duration: 0 };
+            return {
+                box: toScreenBox(this.Objects.bounds(obj)),
+                rotation: obj.rotation || 0,
+                glyph: toScreenBox(rects.glyph),
+                bar: toScreenBox(rects.bar),
+                playing: !!media && media.isPlaying(obj.id),
+                progress: progress.duration > 0 ? Math.min(1, progress.current / progress.duration) : 0,
+                hot: this._hoverId === obj.id && this._hoverPart === "mediaplay"
             };
         }
 
@@ -1414,6 +1520,7 @@
             // not an undo. The stack is dropped, as it is when a board is opened.
             this._undo = [];
             this._redo = [];
+            this._assetSnapshot = this._docAssets();
 
             this.view.panX = 0;
             this.view.panY = 0;
@@ -1829,16 +1936,64 @@
 
         /* --------------------------------------------------------------- undo */
 
+        // Each step records every asset its before and after states name — the board as of
+        // the previous step, and as it is now — because the commands are closures and cannot
+        // be asked. retainedAssets() is the union over both stacks: the files an undo or a
+        // redo could still bring back, which the store's sweep must not delete.
         _push(command) {
+            const after = this._docAssets();
+            command.assets = new Set([...this._assetSnapshot, ...after]);
+            this._assetSnapshot = after;
             this._undo.push(command);
             if (this._undo.length > UNDO_LIMIT) this._undo.shift();
             this._redo.length = 0;
+        }
+
+        // A file written onto an object without an undo step — a tile's poster, a refreshed
+        // card's picture. Without this the next step would not record it, and an undo past
+        // that step would bring the object back naming a file the sweep had deleted.
+        noteAsset(name) {
+            if (typeof name === "string" && name) this._assetSnapshot.add(name);
+        }
+
+        _docAssets() {
+            const names = new Set();
+            for (const obj of this.doc ? this.doc.objects : []) {
+                for (const name of this._assetsOf(obj)) names.add(name);
+            }
+            return names;
+        }
+
+        // The same fields the store's sweep counts as in use.
+        _assetsOf(obj) {
+            return [obj.image?.asset, obj.media?.asset, obj.file?.asset, obj.webcard?.asset, obj.webBrowser?.poster]
+                .filter(name => typeof name === "string" && name);
+        }
+
+        // What the board and the object clipboard name right now — the files that must stay in place.
+        liveAssets() {
+            const names = this._docAssets();
+            for (const name of this.clipboardAssets()) names.add(name);
+            return [...names];
+        }
+
+        // Every asset the board, its undo and redo history, or the object clipboard still names.
+        retainedAssets() {
+            const names = this._docAssets();
+            for (const command of [...this._undo, ...this._redo]) {
+                for (const name of command.assets || []) names.add(name);
+            }
+            for (const name of this.clipboardAssets()) names.add(name);
+            return [...names];
         }
 
         undo() {
             const command = this._undo.pop();
             if (!command) return false;
             command.undo();
+            this._assetSnapshot = this._docAssets();
+            // Before the repaint, so nothing tries to load a file that is still in the trash.
+            this.host.store?.restoreFromTrash?.([...this._assetSnapshot]);
             this._redo.push(command);
             this._touch();
             this.invalidate();
@@ -1849,6 +2004,8 @@
             const command = this._redo.pop();
             if (!command) return false;
             command.redo();
+            this._assetSnapshot = this._docAssets();
+            this.host.store?.restoreFromTrash?.([...this._assetSnapshot]);
             this._undo.push(command);
             this._touch();
             this.invalidate();
@@ -2151,6 +2308,16 @@
                 }
             }
 
+            // A media object's play/pause glyph, gated on hover exactly as the Markdown
+            // link is and for the same reason: the glyph is drawn only while the object's
+            // controls are showing, and a press must not act on one nobody could see.
+            if (hit.type === "media" && !e.shiftKey && !e.ctrlKey &&
+                this._hoverId === hit.id && this._hoverPart === "mediaplay") {
+                this.select([hit.id]);
+                if (this.host.media) this.host.media.toggle(hit.id);
+                return;
+            }
+
             // Clicking a live card hands the pointer straight to the page inside it —
             // one click, because anything more makes the card feel dead. Shift and Ctrl
             // are excluded so multi-select and duplicate still reach the board.
@@ -2218,6 +2385,15 @@
                 // keeps the bar on screen for the length of a drag it started rather than
                 // hiding it the way it hides for every other gesture.
                 fromChrome: chromePart === "bar",
+                // A click on a file card's open or folder disc — a press that ends without
+                // travelling — does what the disc says; anywhere else on the card a click
+                // only selects, and a double-click opens (_onDblClick). Decided at release
+                // rather than here, so the same press can still be the start of a drag; see
+                // _onPointerUp. Plain clicks only: a modifier means select or duplicate.
+                clickOpen: hit.type === "file" && !e.shiftKey && !e.ctrlKey && this._hitFileControl(hit, world)
+                    ? hit.id : null,
+                clickPart: hit.type === "file" ? this._hitFileControl(hit, world) : null,
+                downScreen: this._screenPoint(e),
                 originals: ids.map(id => deepCopy(this._byId(id))).filter(Boolean)
             }, e);
         }
@@ -2669,6 +2845,26 @@
                 case "rotate":
                     this.commitMutation();
                     this._endActive();
+                    // A click on a file card's disc — the press went nowhere — opens or reveals
+                    // it. A few pixels of slop, because a mouse rarely releases exactly where it
+                    // pressed and `moved` is set by any pointermove at all. A double-click on a
+                    // disc opens once: the second click is dropped here (a pointer event's
+                    // `detail` is always 0, so it is told apart by time), and _onDblClick skips
+                    // the discs.
+                    if (drag.clickOpen) {
+                        const up = this._screenPoint(e);
+                        const from = drag.downScreen || up;
+                        const last = this._lastDiscClick;
+                        const now = Date.now();
+                        const repeat = last && last.id === drag.clickOpen && last.part === drag.clickPart &&
+                            now - last.at < DOUBLE_CLICK_MS;
+                        if (!repeat && Math.hypot(up.x - from.x, up.y - from.y) < 4) {
+                            this._lastDiscClick = { id: drag.clickOpen, part: drag.clickPart, at: now };
+                            const obj = this._byId(drag.clickOpen);
+                            if (obj && drag.clickPart === "filereveal") this.host.capture.revealFile(obj);
+                            else if (obj) this.host.capture.openFile(obj, { screenX: e.screenX, screenY: e.screenY });
+                        }
+                    }
                     break;
 
                 case "draw-shape": {
@@ -2772,6 +2968,12 @@
             }
             if (hit && hit.type === "webcard" && hit.webcard.url) {
                 this.host.capture.openWebcard(hit);
+                e.preventDefault();
+                return;
+            }
+            // The card body; a disc has already acted on the first click of the pair.
+            if (hit && hit.type === "file" && !this._hitFileControl(hit, world)) {
+                this.host.capture.openFile(hit, { screenX: e.screenX, screenY: e.screenY });
                 e.preventDefault();
                 return;
             }
@@ -3090,6 +3292,13 @@
         // and has no business touching what the user has on their clipboard.
         copySelection(options) { return this.copyObjects([...this.selection], options); }
 
+        // Every asset the object clipboard names. It outlives a board switch — setDocument
+        // does not clear it — so the store's close-time sweep keeps these rather than delete
+        // a file a paste is about to need. The same fields the sweep counts as in use.
+        clipboardAssets() {
+            return this._clipboard.flatMap(obj => this._assetsOf(obj));
+        }
+
         // The id-taking form, and the reason there is one: a locked object is never
         // selected, so on the context menu "what you right-clicked" and "what is selected"
         // are two different lists. Returns how many objects it actually took, so a caller
@@ -3099,6 +3308,7 @@
             const objects = ids.map(id => this._byId(id)).filter(Boolean);
             if (!objects.length) return 0;
             this._clipboard = objects.map(deepCopy);
+            this._clipboardEasel = this.doc ? this.doc.id : null;
 
             // Copying in the easel now writes to the system clipboard too, and that is what
             // makes Ctrl+V unambiguous.
@@ -3309,11 +3519,20 @@
                 }
                 return copy;
             });
+            // Copied on another board — the clipboard outlives a board switch — so the files
+            // the copies name are in that board's assets. The store copies them over and
+            // holds their loads back until they land; the copies keep the same names.
+            const from = this._clipboardEasel;
+            if (from && from !== this.doc.id) {
+                const names = [...new Set(copies.flatMap(obj => this._assetsOf(obj)))];
+                if (names.length) this.host.store?.adoptAssets?.(from, names);
+            }
             this.addObjects(copies);
             // Chained pastes should walk down the canvas rather than stacking. The token is
             // untouched: pasting does not change what is on the system clipboard, so the
             // next Ctrl+V must still compare against what the original copy wrote.
             this._clipboard = copies.map(deepCopy);
+            this._clipboardEasel = this.doc.id;
         }
 
         duplicateSelection() { return this.duplicateObjects([...this.selection]); }

@@ -117,11 +117,11 @@ should become the top of the page. See "Infinite canvas and Arc mode" below.
 Single keys, no modifier:
 
 `V` select · `T` text · `R` rectangle · `O` ellipse · `Y` triangle · `L` line ·
-`A` arrow · `P` pen · `I` image
+`A` arrow · `P` pen · `I` file
 
-Text and image are **actions, not modes**: both do the thing on the first click rather
+Text and file are **actions, not modes**: both do the thing on the first click rather
 than arming a tool and waiting for a second one. `T` drops a ready box in the middle of
-the view; `I` opens the file picker straight away, and the image lands centred. There
+the view; `I` opens the file picker straight away, and the file lands centred. There
 was nothing to aim in the second click — the picker is a dialog, and the file arrived in
 the middle of the view either way.
 
@@ -268,14 +268,14 @@ value to speak for the rest.
 
 **Every type fades.** Opacity lives beside `x`, `y` and `rotation` rather than inside any
 one type's sub-object, so a capture, a caption and a pen stroke all take it — shapes, ink,
-text, still images, animated GIFs, web cards and web tiles.
+text, still images, animated GIFs, video, audio and PDF cards, web cards and web tiles.
 
 Three of those are not painted by the canvas and so cannot be reached by the renderer's
 `globalAlpha`, and each is faded where it actually lives:
 
 | | |
 |---|---|
-| animated GIFs | an `<img>` in the media layer — the compositor fades the element |
+| animated GIFs and video | an `<img>` or `<video>` in the media layer — the compositor fades the element |
 | a text box being edited | the `<textarea>` overlay, alongside its colour and font |
 | a running live tile | sent to the host with the tile's geometry and applied to its wrapper |
 
@@ -927,9 +927,40 @@ trying.
 
 ### Dropping things on the canvas
 
-Drag an image file onto the canvas to place it (PNG, JPEG, WebP, GIF and AVIF). Drag a
-tab, a link, or a URL to get a link card you can double-click to open. Dropped plain
-text becomes a text box.
+Drag any file onto the canvas to place it. The same files can be pasted from the file
+manager or picked with the toolbar's **File** button (`I`):
+
+| | |
+|---|---|
+| images | PNG, JPEG, WebP, GIF, AVIF, BMP, ICO and SVG. An SVG is drawn as vector, so it stays crisp at any zoom; it is sanitised on the way in (scripts, event handlers, `foreignObject` and external references are stripped, and an absolute size is written on it) and stored as `.svg`. An SVG with SMIL animation is drawn still. |
+| video | MP4, M4V, WebM, OGV, and MOV/MKV when Firefox can decode them. The object is sized to the file's frame. Hover it for the play/pause glyph and the progress bar; the context menu has **Play**/**Pause** too. Every video is test-decoded when it is added; one Firefox cannot play (AVI, WMV and FLV never, HEVC often) becomes a file card instead. One that plays but has no picture — a WebM or MP4 of a song — becomes an audio card, unless it is big enough to be linked, in which case it is a file card. |
+| audio | MP3, WAV, OGG, Opus, FLAC, M4A, AAC, WebM audio. A card with a note and the file name; the play glyph sits where the note is while the card is hovered or selected. |
+| any other file | a card styled like a web card's bar: the file type's icon — the same one Windows shows for it (a document glyph badged with the extension when the system has none) — its name, and the round open button. **Double-click it**, or click its open button, to open it; a single click selects it and a drag moves it. A linked file also has a folder button, which shows it in its folder. A PDF opens in Glance (Firefox's own PDF viewer), or in a tab if Glance is off or already showing something. Anything else opens in its default application — an attached `.docx` opens in Word under its stored name (a uuid), and what you save there is saved into the board's copy. Programs and scripts (`.exe`, `.bat`, …) always ask first, with the same prompt Firefox uses for downloads. |
+
+**Attached or linked.** A file of 25 MB or less is **attached**: copied into the board, so
+it goes wherever the board goes. A bigger one is **linked**: the card remembers where the
+original is and nothing is copied — it carries a small arrow and the file's size, its
+context menu adds **Show in folder**, and if the original is moved or deleted, clicking it
+says so. Deleting a linked card never touches the original. One exception: a file whose
+path is in the system's temp folder — dragged out of a zip or a mail attachment — is
+attached up to 2 GB instead, because Windows cleans that folder up and a link to it would
+break almost at once. Links are to local drives only; network (`\\server\share`) paths
+can't be linked.
+
+Which decoders exist is Firefox's business: an ALAC `.m4a` lands on the board but says
+"can't be played here" when pressed. Video, audio and attached files are streamed, never
+read into memory, so a large video costs no RAM. Video and audio follow the same 25 MB
+rule as other files: up to 25 MB they are **copied** into the easel's asset directory, and
+beyond that they are **linked** — the object plays the original where it is and nothing is
+copied. A linked video's context menu has **Show in folder**; if the original is moved or
+deleted, the object shows a placeholder instead of the picture. Files from the temp folder
+are copied up to 2 GB, as above. SVGs over 4 MB are refused.
+
+Boards with linked cards, or file cards other than PDFs, need Zen Easel 0.7.0 or later:
+an older version drops those cards when it saves the board.
+
+Drag a tab, a link, or a URL to get a link card you can double-click to open. Dropped
+plain text becomes a text box.
 
 Link cards are filled in from what the browser already knows — if the URL is open in a
 tab, its title and favicon. Arc fetches the page and parses its `og:` tags; that is
@@ -952,15 +983,29 @@ is no gesture-specific code anywhere in this mod.
   index.json                   which easels exist, and which was open last
   easels/<id>.json             one document: objects, background, saved viewport
   easels/<id>.thumb.png        card thumbnail for the library
-  assets/<id>/<uuid>.png       captures and dropped images
+  assets/<id>/<uuid>.*         captures, dropped images, video, audio and attached files
+  trash/<id>/<uuid>.*          files of deleted objects that Undo can still bring back
 ```
 
 Set `zen.easel.storage-dir` to keep them somewhere else.
 
-Unreferenced assets are swept once a day, on idle, with a 24-hour grace period so a
-file written moments ago is never collected before the object referencing it is saved.
-`.tmp` files left by an interrupted write and asset directories whose easel is gone are
-swept the same way.
+Deleting an easel deletes its asset and trash directories with it. Deleting an image,
+video or file from a board moves its file out of `assets/<id>/` into `trash/<id>/` as soon
+as the board has saved (about half a second), and **Undo** moves it back. The trash is
+emptied when you close the board's tab or switch that tab to another board — the undo
+history ends there — and an entry is deleted sooner if it drops out of the undo history
+(after 100 further steps). A file nothing can bring back, and that is not on the easel's
+own clipboard (a cut you have not pasted yet), is deleted outright once it is ten seconds
+old. That clipboard survives switching the tab to another board, and pasting there copies
+the files the objects need into the new board's `assets/<id>/`. This is best effort rather than a guarantee: it is skipped while the board is also
+open in Glance, for a tab that was only put away in the back/forward cache, and for a file
+another program is holding open. Trash left behind by a quit, a crash or a closed window is
+deleted the next time Zen starts, since Undo does not survive a restart.
+
+Anything those miss is caught by the daily sweep: once a day, on idle, unreferenced
+assets older than 24 hours are deleted. `.tmp` files left by an interrupted write and
+asset directories whose easel is gone are swept the same way. Linked files live outside
+this folder and are never deleted.
 
 Documents are written atomically through a temp file, so a crash mid-write leaves the
 previous good copy intact rather than a truncated one. Changes are flushed 500ms after
@@ -969,7 +1014,12 @@ again during shutdown via an AsyncShutdown blocker.
 
 Images are handed to the renderer as `blob:` URLs rather than `file://` ones. Profile
 paths routinely contain spaces and parentheses, and every `file://` URL built from one
-is a quoting bug waiting to happen.
+is a quoting bug waiting to happen. Video and audio assets are `blob:` URLs too, but made
+from a disk-backed `File` on the asset's path rather than from bytes, so they stream and
+nothing of the file is held in memory. An attached file card is never loaded by the page
+at all. The one `file://` URL the mod builds is the one a PDF card opens, and the browser
+window builds it — for an attached PDF from the easel id and the asset name through the
+same validators the store uses, for a linked one from its checked path.
 
 ---
 
@@ -1022,7 +1072,7 @@ window still open.
 | `background/actors.sys.mjs` | what the three window actors are, and how to install them |
 | `background/store.sys.mjs` | owns the disk: index, write queue, shutdown blocker, asset sweep |
 | `background/urlbar.sys.mjs` | the address-bar provider that suggests boards by title, or by the `easel` keyword |
-| `background/validate.sys.mjs` | the URL/id/asset-name rules, shared by everything |
+| `background/validate.sys.mjs` | the URL/id/asset-name/local-path rules, shared by everything, and `assetKind` — which of image, video, audio or file a name may be used as |
 | `background/capture-backdrop.sys.mjs` | hooks `ScreenshotsUtils.createCanvas` so Zen's own screenshots composite onto the window's colour instead of white |
 
 **In the browser window** — the parts that genuinely cannot live in a page.
@@ -1050,7 +1100,7 @@ process.
 | `modules/freehand.uc.js` | variable-width stroke geometry |
 | `modules/guides.uc.js` | Arc's six alignment guides |
 | `modules/live-layer.uc.js` | live web cards and web tiles: which are live, the cap and its LRU, crop geometry, activation |
-| `modules/media-layer.uc.js` | the `<img>` layer *under* the canvases — the only form in which an animated GIF actually animates; everything drawn on the board still paints over it |
+| `modules/media-layer.uc.js` | the `<img>`/`<video>` layer *under* the canvases — the only form in which an animated GIF actually animates; everything drawn on the board still paints over it. Also holds each audio card's `<audio>` engine, and the play/pause API the canvas's glyph calls |
 | `modules/text-editor.uc.js` | the textarea shown while editing a text box |
 | `modules/text-controls.uc.js` | the vertical strip beside a selected text box: typeface, paragraph style, highlighter |
 | `modules/shape-controls.uc.js` | the same strip beside a selected shape, offering solid fill or outline (not for lines and arrows) |
@@ -1059,7 +1109,7 @@ process.
 | `modules/canvas.uc.js` | viewport transform, input, selection, undo, the title heading, export |
 | `modules/color-picker.uc.js` | the colour wheel panel, shared by the toolbar and the board menu |
 | `modules/tools.uc.js` | toolbar, colour and tool state, context menu |
-| `modules/capture-page.uc.js` | placing captures, drops, file import |
+| `modules/capture-page.uc.js` | placing captures, drops, paste and the file picker: the one `_addFile` gate for every kind, the SVG sanitiser, the video probe, the disk-copy import for video/audio, and attach-or-link for file cards |
 | `modules/library.uc.js` | easel switcher |
 | `actors/` | the three JSActor pairs — see below |
 | `fonts/` | Arc's openly licensed Easel typefaces |
@@ -1221,10 +1271,25 @@ Worth stating plainly rather than leaving implied:
   length-capped, and what gets written to disk is the canonical spec, so it is
   re-validated on every load rather than trusted because it was checked once. Opening a
   card uses a **null** triggering principal, not the system principal — two independent
-  controls, either sufficient on its own.
+  controls, either sufficient on its own. The one exception is a PDF card: its `file:` URL
+  is not stored anywhere but built by the browser window — from the easel id and the asset
+  name (`isSafeId`, `isSafeAssetName`) for an attached PDF, from the `safeLocalPath`-checked
+  path for a linked one — and it opens with a content principal for that very URI — the
+  narrowest principal that can load a `file:` at all, and still never the system
+  principal. Other file cards are handed to the OS, not loaded.
+- **A linked file's path is the one filesystem path a board stores**, and a click hands it
+  to the OS (or, for a PDF, to Glance), so it passes `safeLocalPath` on load, on the page's way out and again in the
+  browser window: an allow-list of plain local paths (a drive letter, no UNC or device
+  namespace, no alternate data stream, no segment ending in a dot or space). Executables,
+  linked or attached, always get Firefox's launch prompt. None of this is reachable from
+  a live tile.
 - **Asset names and easel ids are validated where paths are built**, not only where they
-  are read, and `.svg` is deliberately not an accepted image format: these names end up
-  in `createObjectURL` and then an `<img>`.
+  are read, and the extension decides what a name may be used *as* (`assetKind`): an
+  image object cannot name a video, a card's screenshot cannot name a PDF. A file card
+  may name any safe asset, since it is never loaded by the page, and a name that is a
+  Windows device (`nul.txt`, `com1.png`) is refused outright. `.svg` is
+  accepted since 0.6.0 on two conditions: it is sanitised on ingest, and it is only ever
+  loaded through an `<img>`, where a script could not run anyway.
 - **The page has a restrictive CSP, and no `frame-src` at all.** `connect-src 'none'` means
   no `fetch`/XHR can be added later without the policy being edited first, and the absence
   of `http:`/`https:` from `img-src` makes the local-favicons-only rule an engine guarantee

@@ -589,6 +589,7 @@
             // the undo stack would mean Ctrl+Z stepping back through pictures rather than
             // through the things the user actually did.
             target.webBrowser.poster = asset;
+            this.host.canvas.noteAsset(asset);
             this.host.store.markDirty();
             this.host.canvas.invalidate();
         }
@@ -809,6 +810,7 @@
             // putting it on the undo stack would make Ctrl+Z step back through pictures
             // instead of through the things the user actually did. The offset travels with
             // it because the two are one fact — this picture, taken there.
+            this.host.canvas.noteAsset(asset);
             this.host.store.markDirty();
             this.log("refreshed", target.type, obj.id, "-> offset",
                 JSON.stringify(measured.scroll), "asset", asset);

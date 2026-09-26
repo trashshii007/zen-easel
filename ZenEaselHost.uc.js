@@ -21,6 +21,9 @@
 (function () {
     const BASE = "chrome://sine/content/zen-easel/";
 
+    // How long after an easel tab closes its board's files are swept — long enough for the page's final save to be queued.
+    const CLOSE_SWEEP_DELAY_MS = 2000;
+
     const MODULES = [
         ["ZenEaselUtil", "modules/util.uc.js"],
         ["ZenEaselCaptureHost", "modules-host/capture-host.uc.js"],
@@ -94,6 +97,9 @@
                 window.addEventListener("unload", this._onUnload, { once: true });
                 this._onTabSelect = this._onTabSelect.bind(this);
                 window.addEventListener("TabSelect", this._onTabSelect);
+                this._closeSweeps = new Set();
+                this._onEaselTabClose = this._onEaselTabClose.bind(this);
+                window.addEventListener("TabClose", this._onEaselTabClose);
 
                 // Adds "Easel" to Zen's region bar and screenshot preview. Lives here rather
                 // than in the page because it has to work when no easel is open, which is
@@ -355,6 +361,26 @@
             } catch (e) {
                 return [];
             }
+        }
+
+        // A closed easel tab ends that board's undo history, so its trash is emptied and any
+        // file it no longer names is deleted. Done here rather than from the page's pagehide,
+        // where a closing tab can no longer reach this window to ask whether another view of
+        // the board is open — and "cannot tell" has to mean "keep". The delay lets pagehide
+        // queue the final save first; sweepEasel drains it before reading the document.
+        _onEaselTabClose(event) {
+            const tab = event.target;
+            if (!tab || !this._matchEaselTab(tab)) return;
+            const easelId = this._easelIdForTab(tab);
+            if (!easelId) return;
+            const timer = setTimeout(() => {
+                this._closeSweeps.delete(timer);
+                if (this.hasOtherViewOf(easelId, tab)) return;
+                const { EaselStore } = ChromeUtils.importESModule(BASE + "background/store.sys.mjs");
+                EaselStore.sweepEasel(easelId)
+                    .catch(e => console.error("[zen-easel] could not clear the closed board's files:", e));
+            }, CLOSE_SWEEP_DELAY_MS);
+            this._closeSweeps.add(timer);
         }
 
         _easelIdForTab(tab) {
@@ -1409,7 +1435,117 @@
                 .catch(e => console.error("[zen-easel] could not open", spec, e));
         }
 
-        _openUrlInTab(spec) {
+        // Opens one of a board's own files — an attached file card — outside the board: a
+        // PDF in Glance, the same overlay a link gets, and anything else in its default
+        // app. Nothing here is a URL from a document: the page hands over two names, the
+        // easel id and the asset name, and the path is rebuilt from them through the
+        // store's own validators (isSafeId, isSafeAssetName by construction in
+        // _assetPath), so the only thing that can be opened is a file inside this easel's
+        // own asset directory. Resolves to a reason for the page to toast, or null.
+        //
+        // Page-only, and it must stay so — as must openLinkedFile and revealLinkedFile.
+        // ZenEaselLiveParent is the one path by which arbitrary web content reaches this
+        // host, and it calls openUrl, which is held to http/https; a tile must never be
+        // able to ask for a file: load or a launch, however the path is built. Do not
+        // route any of these through an actor.
+        //
+        // A PDF's principal is a content principal for the file's own URI — a self-load
+        // passes every file: policy, and it is the narrowest principal that can load one
+        // at all (a null principal cannot). Not the system principal, as _openUrlInTab's
+        // comment explains for links, even though this URL is built rather than stored.
+        async openAsset(easelId, name, origin) {
+            const { isSafeAssetName } = ChromeUtils.importESModule(BASE + "background/validate.sys.mjs");
+            if (!isSafeAssetName(name)) return null;
+            const { EaselStore } = ChromeUtils.importESModule(BASE + "background/store.sys.mjs");
+            try {
+                const path = await EaselStore.assetPath(easelId, name);
+                if (!(await IOUtils.exists(path))) return "That file is no longer available on this board";
+                if (this._isPdf(path)) return this._openPdf(path, origin);
+                return await this._launchLocal(path);
+            } catch (e) {
+                console.error("[zen-easel] could not open the file", name, e);
+                return "Could not open that file";
+            }
+        }
+
+        // A linked file card: the original — a PDF in Glance like an attached one, anything
+        // else with its default app. The path came from a board file, so it is held to
+        // safeLocalPath here as well as on the page; the file: URL is built from that
+        // checked path and opened with the same self-only principal as openAsset's.
+        async openLinkedFile(path, origin = null) {
+            const file = this._linkedFile(path);
+            if (typeof file === "string") return file;
+            try {
+                if (this._isPdf(file.path)) return this._openPdf(file.path, origin);
+                return await this._launchLocal(file.path);
+            } catch (e) {
+                console.error("[zen-easel] could not open", path, e);
+                return `Could not open ${file.leafName}`;
+            }
+        }
+
+        _isPdf(path) {
+            return path.toLowerCase().endsWith(".pdf");
+        }
+
+        // A local PDF in Glance, with a content principal for its own file: URI; see openAsset.
+        _openPdf(path, origin) {
+            const spec = PathUtils.toFileURI(path);
+            const principal = Services.scriptSecurityManager.createContentPrincipal(
+                Services.io.newURI(spec), {});
+            this._openExternalInGlance(spec, origin, principal)
+                .catch(e => console.error("[zen-easel] could not open the file", path, e));
+            return null;
+        }
+
+        // Shows a linked file in its folder; the parent folder itself where reveal is not supported, as DownloadIntegration.showContainingDirectory does.
+        async revealLinkedFile(path) {
+            const file = this._linkedFile(path);
+            if (typeof file === "string") return file;
+            try {
+                file.reveal();
+            } catch (e) {
+                try {
+                    file.parent.launch();
+                } catch (e2) {
+                    console.error("[zen-easel] could not show", path, e2);
+                    return `Could not show ${file.leafName}`;
+                }
+            }
+            return null;
+        }
+
+        // The nsIFile for a linked path, or the reason there is none.
+        _linkedFile(path) {
+            const { safeLocalPath } = ChromeUtils.importESModule(BASE + "background/validate.sys.mjs");
+            const safe = safeLocalPath(path);
+            if (!safe) return "That file can't be opened from this board";
+            const { FileUtils } = ChromeUtils.importESModule("resource://gre/modules/FileUtils.sys.mjs");
+            let file;
+            try {
+                file = new FileUtils.File(safe);
+                if (file.exists() && file.isFile()) return file;
+            } catch (e) { }
+            return `${PathUtils.filename(safe)} is no longer at ${safe}`;
+        }
+
+        // Hands a local file to the OS. An executable asks first, with the prompt Firefox
+        // uses for downloads — and unlike Firefox, for .exe too: Firefox leaves that to the
+        // prompt Windows shows for a download's security zone, which a copied or linked file
+        // does not carry. Resolves to a reason for the page, or null.
+        async _launchLocal(path) {
+            const { FileUtils } = ChromeUtils.importESModule("resource://gre/modules/FileUtils.sys.mjs");
+            const file = new FileUtils.File(path);
+            if (file.isExecutable()) {
+                const { DownloadUIHelper } =
+                    ChromeUtils.importESModule("resource://gre/modules/DownloadUIHelper.sys.mjs");
+                if (!(await DownloadUIHelper.getPrompter(window).confirmLaunchExecutable(path))) return null;
+            }
+            file.launch();
+            return null;
+        }
+
+        _openUrlInTab(spec, principal = null) {
             try {
                 // openWebLinkIn rather than addTab + selectedTab, which is what this used
                 // to be. Selecting a tab and *focusing* it are two different things, and
@@ -1426,8 +1562,12 @@
                 // let javascript:, data:, file: and chrome: load with privilege from a
                 // string that originates in a file on disk. Passed explicitly so that
                 // intent stays legible; openWebLinkIn throws on a system principal anyway.
+                //
+                // `principal` is the one exception, and it is never the system principal
+                // either: openAsset passes a content principal for a file: URI the host
+                // built itself, which a null principal could not load.
                 openWebLinkIn(spec, "tab", {
-                    triggeringPrincipal: Services.scriptSecurityManager.createNullPrincipal({})
+                    triggeringPrincipal: principal || Services.scriptSecurityManager.createNullPrincipal({})
                 });
             } catch (e) {
                 console.error("[zen-easel] could not open", spec, e);
@@ -1468,9 +1608,9 @@
         // Every way out of this says which one it took. A link that lands in a tab
         // when it should have been an overlay is otherwise indistinguishable from a
         // link that was never routed here at all.
-        _fallBackToTab(spec, reason) {
+        _fallBackToTab(spec, reason, principal = null) {
             console.warn("[zen-easel] link opening in a tab instead of glance:", reason);
-            this._openUrlInTab(spec);
+            this._openUrlInTab(spec, principal);
         }
 
         // Same payload Glance's own tests use (GlanceTestUtils.openGlanceOnTab).
@@ -1484,11 +1624,14 @@
         // would add nothing except turning Glance's own check into a formality and giving a
         // content-chosen URL a privileged opener. _openEaselInGlance passes the system
         // principal because it is opening this mod's own chrome page.
-        _glanceExternalData(spec, origin) {
+        //
+        // The one other caller is openAsset, whose file: URL a null principal cannot load;
+        // it passes a content principal for that URI and nothing wider.
+        _glanceExternalData(spec, origin, principal = null) {
             return {
                 url: spec,
                 ...this._glanceLinkOrigin(origin),
-                triggeringPrincipal: Services.scriptSecurityManager.createNullPrincipal({})
+                triggeringPrincipal: principal || Services.scriptSecurityManager.createNullPrincipal({})
             };
         }
 
@@ -1520,13 +1663,15 @@
             } catch (e) { }
         }
 
-        async _tryOpenGlance(mgr, spec, origin) {
-            const data = this._glanceExternalData(spec, origin);
+        async _tryOpenGlance(mgr, spec, origin, principal) {
+            const data = this._glanceExternalData(spec, origin, principal);
             this._setLinkClickData(mgr, data);
             return mgr.openGlance(data);
         }
 
-        async _openExternalInGlance(spec, origin) {
+        // `principal` is null for a link (a null principal is made) and a file: content
+        // principal for openAsset; it rides along every way out, including the tab.
+        async _openExternalInGlance(spec, origin, principal = null) {
             const mgr = window.gZenGlanceManager;
             // Every way out of glance says which one it took, so the shared availability
             // test is re-stated here as three separate refusals rather than reused: a link
@@ -1535,16 +1680,16 @@
             // same question for the capture path, where nothing is logged because a tab is
             // an ordinary outcome there rather than a fallback.
             if (!mgr || typeof mgr.openGlance !== "function") {
-                this._fallBackToTab(spec, "gZenGlanceManager.openGlance is missing");
+                this._fallBackToTab(spec, "gZenGlanceManager.openGlance is missing", principal);
                 return;
             }
             try {
                 if (!Services.prefs.getBoolPref("zen.glance.enabled", true)) {
-                    this._fallBackToTab(spec, "zen.glance.enabled is off");
+                    this._fallBackToTab(spec, "zen.glance.enabled is off", principal);
                     return;
                 }
             } catch (e) {
-                this._fallBackToTab(spec, "zen.glance.enabled could not be read");
+                this._fallBackToTab(spec, "zen.glance.enabled could not be read", principal);
                 return;
             }
 
@@ -1553,7 +1698,7 @@
             const already = this._currentGlanceTab();
             if (already) {
                 this._fallBackToTab(spec, "a glance is already open on " +
-                    (already.linkedBrowser?.currentURI?.spec || "an unknown page"));
+                    (already.linkedBrowser?.currentURI?.spec || "an unknown page"), principal);
                 return;
             }
 
@@ -1561,10 +1706,10 @@
             let tab = null;
             let failure = null;
             try {
-                tab = await this._tryOpenGlance(mgr, spec, origin);
+                tab = await this._tryOpenGlance(mgr, spec, origin, principal);
                 if (!tab) {
                     this._clearStaleGlance(mgr);
-                    tab = await this._tryOpenGlance(mgr, spec, origin);
+                    tab = await this._tryOpenGlance(mgr, spec, origin, principal);
                 }
             } catch (e) {
                 failure = e;
@@ -1575,7 +1720,7 @@
 
             this._fallBackToTab(spec, failure
                 ? "openGlance threw, see the error above"
-                : `openGlance returned ${tab ? "a tab that is not a glance" : String(tab)}`);
+                : `openGlance returned ${tab ? "a tab that is not a glance" : String(tab)}`, principal);
         }
 
         /* ------------------------------------------------------- live web cards */
@@ -1768,6 +1913,9 @@
             try { this._uninstallCreateNew(); } catch (e) { }
             window.removeEventListener("unload", this._onUnload);
             if (this._onTabSelect) window.removeEventListener("TabSelect", this._onTabSelect);
+            if (this._onEaselTabClose) window.removeEventListener("TabClose", this._onEaselTabClose);
+            for (const timer of this._closeSweeps || []) clearTimeout(timer);
+            this._closeSweeps?.clear();
             if (this.screenshotHook) {
                 this.screenshotHook.destroy();
                 this.screenshotHook = null;

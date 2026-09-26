@@ -54,6 +54,18 @@
     // so the card keeps its chrome off entirely and the context menu is the way in.
     const CHROME_MIN_HEIGHT = 64;
 
+    // A file card is drawn as the card bar itself — same tint, border, shadow, title type and
+    // button discs, with the file type's icon where the favicon sits — so a document on the
+    // board reads as the same component as a web card's bar. The glyphs are the bar's own
+    // mask paths (chrome.css), in the same 12-unit box.
+    const FILE_ICON = 32;
+    const FILE_PAD = 12;
+    const FILE_GLYPH = 12;
+    const FILE_GLYPHS = {
+        open: "M4 1.6h6.4V8h-1.6V4.3L3.1 10 2 8.9l5.7-5.7H4z",
+        reveal: "M1.4 2.6h3.5l1.1 1.2h4.6v5.8H1.4z"
+    };
+
     // The hover halo. Held clear of the object's own edge so it still reads around a live
     // card, whose interior belongs to a <browser> drawn above this canvas. See
     // _drawHoverGlow.
@@ -145,6 +157,10 @@
             // asset name -> HTMLImageElement. Decoding is async; a miss paints a
             // placeholder and repaints when the bitmap lands.
             this._images = new Map();
+            // extension -> <img> of the OS icon for that file type. A handful per board, kept for the page's life.
+            this._fileIcons = new Map();
+            // CSS custom property -> trimmed value, for the current pass; see _cssVar.
+            this._styleCache = new Map();
             // "content|font|size|width" -> string[]. Word wrapping costs a measureText
             // per word, so it is memoised rather than redone every frame.
             this._wrapCache = new Map();
@@ -341,6 +357,8 @@
         }
 
         _begin(ctx, view) {
+            // Every pass starts here, so theme values are read fresh once per pass; see _cssVar.
+            this._styleCache.clear();
             ctx.setTransform(1, 0, 0, 1, 0, 0);
             // The whole backing store, not the viewport: a buffer can be larger than the
             // board is showing and the excess is only clipped, so clearing to the viewport
@@ -527,6 +545,8 @@
                 case "ink": this._drawInk(ctx, obj); break;
                 case "text": this._drawText(ctx, obj); break;
                 case "image": this._drawImage(ctx, obj); break;
+                case "media": this._drawMedia(ctx, obj); break;
+                case "file": this._drawFile(ctx, obj); break;
                 case "webcard": this._drawWebcard(ctx, obj); break;
                 case "webBrowser": this._drawWebBrowser(ctx, obj); break;
             }
@@ -1145,6 +1165,373 @@
             ctx.restore();
         }
 
+        /* ------------------------------------------------------- media & files */
+
+        // "video" or "audio" for a media object, decided by the file it names and nowhere
+        // else — the record does not store which it is.
+        mediaKind(obj) {
+            return this.Objects.mediaKindOf(obj);
+        }
+
+        // A video is a <video> in the media layer while the board is being viewed, so this
+        // runs only for a snapshot, where it paints the element's current frame — or, for
+        // a video whose element has not loaded, a placeholder. An audio file has no picture
+        // and is painted here always: a panel with a note and the file's name, laid out
+        // around the play glyph the overlay draws (mediaControlRects says where).
+        _drawMedia(ctx, obj) {
+            const kind = this.mediaKind(obj);
+            ctx.save();
+            ctx.beginPath();
+            this._roundRect(ctx, obj.x, obj.y, obj.w, obj.h, 10);
+            ctx.clip();
+            ctx.fillStyle = this._panelColor();
+            ctx.fillRect(obj.x, obj.y, obj.w, obj.h);
+
+            if (kind === "video") {
+                const media = this.host.media;
+                const el = media ? media.elementFor(obj.id) : null;
+                // HAVE_CURRENT_DATA: there is a frame to draw. Under preload=metadata the
+                // first frame usually is; if it is not, the export shows the glyph.
+                if (el && el.readyState >= 2 && el.videoWidth) {
+                    ctx.drawImage(el, obj.x, obj.y, obj.w, obj.h);
+                } else {
+                    this._drawGlyph(ctx, "film", obj.x + obj.w / 2, obj.y + obj.h / 2,
+                        Math.min(28, obj.w / 4, obj.h / 4));
+                }
+            } else {
+                const rects = this.mediaControlRects(obj);
+                const label = obj.media.title || "";
+                // The note is what says this card is a sound. It sits in the glyph's slot,
+                // and the overlay's play/pause control covers it while the card is hovered
+                // or selected — so at rest the card is a note and a name.
+                if (rects) {
+                    this._drawGlyph(ctx, "note", rects.glyph.x + rects.glyph.w / 2,
+                        rects.glyph.y + rects.glyph.h / 2, rects.glyph.w * 0.32);
+                }
+                const left = rects ? rects.glyph.x + rects.glyph.w + 10 : obj.x + 12;
+                if (label && obj.w - (left - obj.x) > 24) {
+                    ctx.font = "13px system-ui, sans-serif";
+                    ctx.fillStyle = this._mutedColor();
+                    ctx.textAlign = "left";
+                    ctx.textBaseline = "middle";
+                    ctx.fillText(this._ellipsize(ctx, label, obj.x + obj.w - 12 - left),
+                        left, obj.y + obj.h / 2);
+                }
+            }
+
+            ctx.strokeStyle = this._withAlpha(this._mutedColor(), 0.25);
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            this._roundRect(ctx, obj.x + 0.5, obj.y + 0.5, obj.w - 1, obj.h - 1, 10);
+            ctx.stroke();
+            ctx.restore();
+        }
+
+        // A file card, drawn as the card bar (chrome.css .zen-easel-card-chrome): the file
+        // type's icon, its name, and the bar's open disc — plus a folder disc on a linked
+        // card, whose size follows its name. The whole card opens the file; the discs are
+        // where that is advertised, and the overlay lights them the way the bar does.
+        _drawFile(ctx, obj) {
+            const bar = this._barColors();
+            const radius = 10;
+
+            // The bar's two-layer shadow, painted only outside the card: the card is
+            // translucent, and a canvas shadow under it would show through as a smudge,
+            // which a CSS box-shadow never does.
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(obj.x - 40, obj.y - 40, obj.w + 80, obj.h + 80);
+            this._roundRect(ctx, obj.x, obj.y, obj.w, obj.h, radius);
+            ctx.clip("evenodd");
+            ctx.fillStyle = "#000";
+            for (const [alpha, blur, dy] of [[0.18, 24, 8], [0.10, 2, 1]]) {
+                ctx.shadowColor = `rgba(0, 0, 0, ${alpha})`;
+                ctx.shadowBlur = blur;
+                ctx.shadowOffsetY = dy;
+                ctx.beginPath();
+                this._roundRect(ctx, obj.x, obj.y, obj.w, obj.h, radius);
+                ctx.fill();
+            }
+            ctx.restore();
+
+            ctx.save();
+            ctx.beginPath();
+            this._roundRect(ctx, obj.x, obj.y, obj.w, obj.h, radius);
+            ctx.fillStyle = bar.fill;
+            ctx.fill();
+            ctx.strokeStyle = this._withAlpha(bar.accent, 0.26);
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            this._roundRect(ctx, obj.x + 0.5, obj.y + 0.5, obj.w - 1, obj.h - 1, radius);
+            ctx.stroke();
+
+            ctx.beginPath();
+            this._roundRect(ctx, obj.x, obj.y, obj.w, obj.h, radius);
+            ctx.clip();
+
+            // The OS icon for the file type, as the file manager shows it; the drawn page and
+            // badge until it has loaded, or when the system has none for it.
+            const midY = obj.y + obj.h / 2;
+            const iconSize = Math.min(FILE_ICON, obj.h - 16);
+            const iconX = obj.x + FILE_PAD;
+            const icon = this._fileIcon(this.Objects.fileExtension(obj));
+            if (icon && iconSize > 4) {
+                ctx.drawImage(icon, iconX, midY - iconSize / 2, iconSize, iconSize);
+            } else if (iconSize > 4) {
+                this._drawGlyph(ctx, "document", iconX + iconSize / 2, midY, iconSize * 0.7,
+                    this.Objects.fileBadge(obj));
+            }
+
+            const rects = this.fileChromeRects(obj);
+            for (const key of ["reveal", "open"]) {
+                if (rects && rects[key]) this._drawFileButton(ctx, rects[key], key, bar, false);
+            }
+
+            const left = iconX + iconSize + 10;
+            const right = rects ? rects.labelRight : obj.x + obj.w - FILE_PAD;
+            let label = obj.file.title || "";
+            if (obj.file.path && obj.file.size > 0) label += ` · ${this._formatBytes(obj.file.size)}`;
+            if (label && right - left > 24) {
+                ctx.font = "500 12px system-ui, sans-serif";
+                ctx.fillStyle = this._withAlpha(bar.ink, bar.inkAlpha * 0.92);
+                ctx.textAlign = "left";
+                ctx.textBaseline = "middle";
+                ctx.fillText(this._ellipsize(ctx, label, right - left), left, midY);
+            }
+            ctx.restore();
+        }
+
+        // The bar's colours, from the same three values the page hands the DOM bar: the
+        // board tint, its ink, and Zen's accent.
+        _barColors() {
+            const dark = this.host.getAttribute("data-easel-ink") === "dark";
+            const tint = this._cssVar("--easel-tint", "251, 251, 250");
+            return {
+                fill: `rgba(${tint}, ${dark ? 0.8 : 0.74})`,
+                ink: dark ? "#ffffff" : "#000000",
+                inkAlpha: dark ? 0.86 : 0.78,
+                accent: this._accentColor()
+            };
+        }
+
+        // One of the bar's 24-unit discs with its glyph. `hot` is the bar's [data-hover].
+        _drawFileButton(ctx, rect, kind, bar, hot) {
+            const cx = rect.x + rect.w / 2, cy = rect.y + rect.h / 2, r = rect.w / 2;
+            ctx.save();
+            ctx.beginPath();
+            ctx.arc(cx, cy, r, 0, Math.PI * 2);
+            if (hot) {
+                ctx.shadowColor = this._withAlpha(bar.accent, 0.55);
+                ctx.shadowBlur = 12 * (rect.w / CHROME_BUTTON);
+                ctx.fillStyle = this._withAlpha(bar.accent, 0.3);
+                ctx.fill();
+                ctx.shadowBlur = 0;
+                ctx.strokeStyle = this._withAlpha(bar.accent, 0.45);
+                ctx.lineWidth = rect.w / CHROME_BUTTON;
+                ctx.stroke();
+            } else {
+                ctx.fillStyle = this._withAlpha(bar.accent, 0.14);
+                ctx.fill();
+            }
+            const scale = (FILE_GLYPH / 12) * (rect.w / CHROME_BUTTON);
+            ctx.translate(cx - 6 * scale, cy - 6 * scale);
+            ctx.scale(scale, scale);
+            ctx.fillStyle = this._withAlpha(bar.ink, bar.inkAlpha);
+            ctx.fill(new Path2D(FILE_GLYPHS[kind]));
+            ctx.restore();
+        }
+
+        // A file card's discs, in world units inside its upright box, or null when the card
+        // is too small for them: `open`, `reveal` (linked cards only) and `labelRight`, where
+        // the name has to stop. Shared by the drawing, the canvas's hit test and the overlay,
+        // the rule webcardChromeRects follows for the web card bar.
+        fileChromeRects(obj) {
+            if (!obj || obj.type !== "file" || !obj.file) return null;
+            if (obj.h < CHROME_BUTTON + 8 || obj.w < CHROME_BUTTON * 3) return null;
+            const y = obj.y + obj.h / 2 - CHROME_BUTTON / 2;
+            const open = { x: obj.x + obj.w - FILE_PAD - CHROME_BUTTON, y, w: CHROME_BUTTON, h: CHROME_BUTTON };
+            const reveal = obj.file.path
+                ? { x: open.x - CHROME_GAP - CHROME_BUTTON, y, w: CHROME_BUTTON, h: CHROME_BUTTON }
+                : null;
+            return { open, reveal, labelRight: (reveal || open).x - CHROME_GAP * 2 };
+        }
+
+        // The overlay's half: the disc under the pointer, lit the way the bar lights one.
+        _drawFileHover(ctx, file) {
+            ctx.save();
+            if (file.rotation) {
+                const box = file.box;
+                const cx = box.x + box.w / 2, cy = box.y + box.h / 2;
+                ctx.translate(cx, cy);
+                ctx.rotate((file.rotation * Math.PI) / 180);
+                ctx.translate(-cx, -cy);
+            }
+            this._drawFileButton(ctx, file.button, file.kind, this._barColors(), true);
+            ctx.restore();
+        }
+
+        // The loaded OS icon for an extension, or null while it loads or when there is none.
+        // By extension only — moz-icon://.xlsx — so drawing a card never reads the file.
+        // Requested at twice the drawn size, for a sharp icon on a HiDPI display.
+        _fileIcon(ext) {
+            if (!ext) return null;
+            let icon = this._fileIcons.get(ext);
+            if (!icon) {
+                icon = new Image();
+                icon.onload = () => { if (this.host.canvas) this.host.canvas.invalidate(); };
+                icon.src = `moz-icon://.${ext}?size=64`;
+                this._fileIcons.set(ext, icon);
+            }
+            return icon.complete && icon.naturalWidth ? icon : null;
+        }
+
+        _formatBytes(bytes) {
+            const units = ["B", "KB", "MB", "GB", "TB"];
+            let value = bytes, unit = 0;
+            while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++; }
+            return `${value >= 10 || unit === 0 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
+        }
+
+        // Small line-art symbols, drawn with paths rather than fillText so they render
+        // the same on every platform's font stack. (cx, cy) is the centre, `size` is
+        // roughly the half-extent. `label` is the document glyph's badge.
+        _drawGlyph(ctx, kind, cx, cy, size, label = "") {
+            ctx.save();
+            ctx.strokeStyle = this._withAlpha(this._mutedColor(), 0.8);
+            ctx.fillStyle = this._withAlpha(this._mutedColor(), 0.8);
+            ctx.lineWidth = Math.max(1.5, size / 9);
+            ctx.lineJoin = "round";
+            ctx.lineCap = "round";
+            ctx.beginPath();
+            if (kind === "document") {
+                // A page with a folded corner, and the file's badge beneath the fold.
+                const w = size * 0.8, h = size, fold = size * 0.3;
+                ctx.moveTo(cx - w / 2, cy - h / 2);
+                ctx.lineTo(cx + w / 2 - fold, cy - h / 2);
+                ctx.lineTo(cx + w / 2, cy - h / 2 + fold);
+                ctx.lineTo(cx + w / 2, cy + h / 2);
+                ctx.lineTo(cx - w / 2, cy + h / 2);
+                ctx.closePath();
+                ctx.moveTo(cx + w / 2 - fold, cy - h / 2);
+                ctx.lineTo(cx + w / 2 - fold, cy - h / 2 + fold);
+                ctx.lineTo(cx + w / 2, cy - h / 2 + fold);
+                ctx.stroke();
+                const scale = label.length > 3 ? 0.26 : 0.34;
+                ctx.font = `bold ${Math.max(5, size * scale)}px system-ui, sans-serif`;
+                ctx.textAlign = "center";
+                ctx.textBaseline = "middle";
+                ctx.fillText(label, cx, cy + h * 0.2);
+            } else if (kind === "film") {
+                // A frame with sprocket holes down both sides.
+                const w = size * 1.5, h = size;
+                ctx.rect(cx - w / 2, cy - h / 2, w, h);
+                const hole = h / 6;
+                for (let i = 0; i < 3; i++) {
+                    const y = cy - h / 2 + hole * (0.6 + i * 1.8);
+                    ctx.rect(cx - w / 2 + hole * 0.4, y, hole * 0.8, hole * 0.8);
+                    ctx.rect(cx + w / 2 - hole * 1.2, y, hole * 0.8, hole * 0.8);
+                }
+                ctx.stroke();
+            } else if (kind === "note") {
+                // An eighth note.
+                const r = size * 0.42;
+                ctx.arc(cx - size * 0.25, cy + size * 0.4, r, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.beginPath();
+                ctx.moveTo(cx - size * 0.25 + r * 0.9, cy + size * 0.4);
+                ctx.lineTo(cx - size * 0.25 + r * 0.9, cy - size * 0.7);
+                ctx.quadraticCurveTo(cx + size * 0.5, cy - size * 0.6, cx + size * 0.45, cy - size * 0.05);
+                ctx.stroke();
+            } else if (kind === "play") {
+                ctx.moveTo(cx - size * 0.38, cy - size * 0.5);
+                ctx.lineTo(cx + size * 0.55, cy);
+                ctx.lineTo(cx - size * 0.38, cy + size * 0.5);
+                ctx.closePath();
+                ctx.fill();
+            } else if (kind === "pause") {
+                const w = size * 0.28, h = size;
+                ctx.rect(cx - size * 0.45, cy - h / 2, w, h);
+                ctx.rect(cx + size * 0.17, cy - h / 2, w, h);
+                ctx.fill();
+            }
+            ctx.restore();
+        }
+
+        // Where a media object's controls sit, in world units inside the object's own
+        // upright box: the play/pause glyph and the progress bar. One computation shared
+        // by the canvas's hit test and the overlay's drawing, so the two cannot drift —
+        // the same rule webcardChromeRects follows for the card bar. Null when the object
+        // is too small to carry them.
+        //
+        // A video's glyph is centred on the picture, an audio card's is at the left of
+        // the row, beside the title; the bar runs along the bottom of both.
+        mediaControlRects(obj) {
+            if (!obj || obj.type !== "media") return null;
+            const kind = this.mediaKind(obj);
+            if (obj.w < 40 || obj.h < 28) return null;
+
+            let glyph;
+            if (kind === "video") {
+                const d = Math.min(56, obj.w * 0.4, obj.h * 0.5);
+                glyph = { x: obj.x + (obj.w - d) / 2, y: obj.y + (obj.h - d) / 2, w: d, h: d };
+            } else {
+                const d = Math.min(40, obj.h - 16);
+                glyph = { x: obj.x + 12, y: obj.y + (obj.h - d) / 2, w: d, h: d };
+            }
+            const barInset = kind === "video" ? 10 : 6;
+            const bar = {
+                x: obj.x + barInset, y: obj.y + obj.h - barInset - 4,
+                w: obj.w - barInset * 2, h: 4
+            };
+            return { glyph, bar };
+        }
+
+        // The overlay's half of a media object's controls: the glyph and the progress
+        // bar, in screen space and rotated with the object like the hover glow is.
+        // `media` is what canvas._overlayState assembled — see there for the fields.
+        _drawMediaControls(ctx, media, accent) {
+            const box = media.box;
+            ctx.save();
+            if (media.rotation) {
+                const cx = box.x + box.w / 2;
+                const cy = box.y + box.h / 2;
+                ctx.translate(cx, cy);
+                ctx.rotate((media.rotation * Math.PI) / 180);
+                ctx.translate(-cx, -cy);
+            }
+
+            const g = media.glyph;
+            const r = Math.min(g.w, g.h) / 2;
+            const gx = g.x + g.w / 2, gy = g.y + g.h / 2;
+            ctx.beginPath();
+            ctx.arc(gx, gy, r, 0, Math.PI * 2);
+            ctx.fillStyle = this._withAlpha(this._panelColor(), media.hot ? 0.95 : 0.8);
+            ctx.fill();
+            ctx.strokeStyle = this._withAlpha(media.hot ? accent : this._mutedColor(), 0.6);
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+            this._drawGlyph(ctx, media.playing ? "pause" : "play", gx + (media.playing ? 0 : r * 0.08), gy, r * 0.9);
+
+            const b = media.bar;
+            if (b && b.w > 8) {
+                const radius = b.h / 2;
+                ctx.beginPath();
+                this._roundRect(ctx, b.x, b.y, b.w, b.h, radius);
+                ctx.fillStyle = this._withAlpha(this._panelColor(), 0.7);
+                ctx.fill();
+                ctx.strokeStyle = this._withAlpha(this._mutedColor(), 0.35);
+                ctx.lineWidth = 1;
+                ctx.stroke();
+                if (media.progress > 0) {
+                    ctx.beginPath();
+                    this._roundRect(ctx, b.x, b.y, Math.max(b.h, b.w * media.progress), b.h, radius);
+                    ctx.fillStyle = accent;
+                    ctx.fill();
+                }
+            }
+            ctx.restore();
+        }
+
         _ellipsize(ctx, text, maxWidth) {
             if (ctx.measureText(text).width <= maxWidth) return text;
             let low = 0, high = text.length;
@@ -1269,24 +1656,29 @@
         }
 
         // Only GIFs, decided by the asset's extension. The store files an asset under
-        // the extension it was saved with and validate.sys.mjs allows exactly five
-        // raster formats, of which GIF is the only animated one — APNG and animated
-        // WebP would belong here too if the store ever accepted them, but it does not,
-        // so guessing more broadly would only put still images in the holder.
+        // the extension it was saved with, and of the image formats validate.sys.mjs
+        // allows GIF is the only animated one — APNG and animated WebP would belong here
+        // too if the store ever accepted them, but it does not, so guessing more broadly
+        // would only put still images in the holder. (An SVG with SMIL animation is drawn
+        // still, on the canvas; that is a known limit rather than an oversight.)
         _isAnimated(name) {
             return /\.gif$/i.test(name || "");
         }
 
         // Whether this object is rendered by the DOM media layer instead of by the
-        // canvas. Only animated images are, and only while actually rendering: a
+        // canvas. Animated images and video are, and only while actually rendering: a
         // snapshot has no DOM layer behind it and has to paint everything itself.
         //
         // Consulted by renderStatic and renderActive rather than plumbed through as an
         // option, so there is no way for a caller to forget and paint a still frame
         // underneath the live element.
         isDomRendered(obj) {
-            return !this._snapshotting && obj.type === "image" &&
-                this._isAnimated(obj.image.asset);
+            if (this._snapshotting) return false;
+            if (obj.type === "image") return this._isAnimated(obj.image.asset);
+            // A video whose file could not be loaded — a linked original moved away — is left to
+            // the canvas, which paints its placeholder rather than nothing.
+            return obj.type === "media" && this.mediaKind(obj) === "video" &&
+                !this.host.store?.mediaFailed?.(obj);
         }
 
         // Decoded bitmaps used to be held for the life of the document — releaseImages
@@ -1361,6 +1753,11 @@
             // The hover halo, first — it belongs under everything else the overlay draws,
             // and a marquee sweeping across the board should pass over it rather than under.
             if (state.hover) this._drawHoverGlow(ctx, state.hover, accent);
+
+            // A media object's play/pause glyph and progress bar, while its controls are
+            // showing. Above the halo, below the selection frame.
+            if (state.media) this._drawMediaControls(ctx, state.media, accent);
+            if (state.file) this._drawFileHover(ctx, state.file);
 
             if (state.marquee) {
                 const m = state.marquee;
@@ -1544,10 +1941,16 @@
         /* --------------------------------------------------------------- colors */
 
         // Theme values are read from the host element, where _syncZenColors already
-        // mirrors Zen's own custom properties.
+        // mirrors Zen's own custom properties. Cached until the next pass begins: a board of
+        // file cards asks for the same few values per card, and a theme or ink change always
+        // repaints, which starts a new pass.
         _cssVar(name, fallback) {
-            const value = window.getComputedStyle(this.host).getPropertyValue(name);
-            return value && value.trim() ? value.trim() : fallback;
+            let value = this._styleCache.get(name);
+            if (value === undefined) {
+                value = window.getComputedStyle(this.host).getPropertyValue(name).trim();
+                this._styleCache.set(name, value);
+            }
+            return value || fallback;
         }
 
         _accentColor() { return this._cssVar("--easel-accent", "#2b5fd9"); }

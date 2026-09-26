@@ -442,15 +442,16 @@
 
 /* ------------------------------------------------------------- canvas layers */
 
-/* Animated images. Below the canvases, so a GIF covers the board's grid and everything
-   drawn on the canvas draws over the GIF — see modules/media-layer.uc.js for why that
-   ordering is the one worth having. Clipped to the viewport so a card panned off the
-   board does not paint over the toolbar. */
+/* Animated images and video. Below the canvases, so a GIF covers the board's grid and
+   everything drawn on the canvas draws over the GIF — see modules/media-layer.uc.js for
+   why that ordering is the one worth having. Clipped to the viewport so a card panned
+   off the board does not paint over the toolbar. */
 .easel-media-layer {
   position: absolute;
   inset: 0;
   overflow: hidden;
-  /* The canvas owns every pointer event; these are pixels, not controls. */
+  /* The canvas owns every pointer event; these are pixels, not controls — a video's
+     play glyph is drawn and hit-tested by the canvas for exactly this reason. */
   pointer-events: none;
 }
 
@@ -460,6 +461,11 @@
      than preserving the file's aspect ratio — the object *is* the frame. */
   object-fit: fill;
   transform-origin: center center;
+}
+
+/* An audio file's engine: no picture, so no box. The canvas paints its card. */
+audio.easel-media-item {
+  display: none;
 }
 
 .easel-canvas {

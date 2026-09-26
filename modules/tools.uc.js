@@ -32,7 +32,9 @@
     // the pen. Shortcut keys are unchanged — only the display order moved.
     const TOOLS = [
         { id: "pointer", label: "Select", key: "KeyV" },
-        { id: "image", label: "Image", key: "KeyI" },
+        // Still "image" by id — the icon, the shortcut and the CSS rule are keyed on it —
+        // but the picker behind it takes any file.
+        { id: "image", label: "File", key: "KeyI" },
         { id: "text", label: "Text", key: "KeyT" },
         { id: "ellipse", label: "Ellipse", key: "KeyO" },
         { id: "rectangle", label: "Rectangle", key: "KeyR" },
@@ -448,11 +450,10 @@
             if (id === "image") {
                 this.active = "pointer";
                 this._syncActive();
-                this.host.capture.pickImageFile().catch(err => {
+                // Refusals are toasted inside _addFile; this catch is for the picker itself.
+                this.host.capture.pickFile().catch(err => {
                     console.error("[zen-easel]", err);
-                    // An unsupported file type is a decision the user made and needs to
-                    // hear about; failing silently just looks like the picker did nothing.
-                    this.host.toast(err && err.message ? err.message : "Could not add that image");
+                    this.host.toast(err && err.message ? err.message : "Could not add that file");
                 });
                 return;
             }
@@ -608,6 +609,36 @@
                         label: "Copy link",
                         action: () => this._copyText(hit.webBrowser.url)
                     });
+                    items.push({ separator: true });
+                }
+                // Playback from the menu as well as the glyph: the one route that works
+                // with the glyph covered, or on a card too small to carry it.
+                if (hit.type === "media" && this.host.media) {
+                    const media = this.host.media;
+                    items.push({
+                        label: media.isPlaying(hit.id) ? "Pause" : "Play",
+                        action: () => media.toggle(hit.id)
+                    });
+                    if (hit.media.path) {
+                        items.push({
+                            label: "Show in folder",
+                            action: () => this.host.capture.revealFile(hit)
+                        });
+                    }
+                    items.push({ separator: true });
+                }
+                if (hit.type === "file") {
+                    const pdf = /\.pdf$/i.test(hit.file.title || hit.file.asset || "");
+                    items.push({
+                        label: pdf ? "Open PDF" : "Open file",
+                        action: () => this.host.capture.openFile(hit, null)
+                    });
+                    if (window.ZenEaselObjects.isFileLinked(hit)) {
+                        items.push({
+                            label: "Show in folder",
+                            action: () => this.host.capture.revealFile(hit)
+                        });
+                    }
                     items.push({ separator: true });
                 }
                 // Arc's updateTitleObject(_:). Offered on any text box that is not already
