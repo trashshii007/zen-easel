@@ -606,6 +606,23 @@
             if (this.element) await this.element.refreshIfStale();
         }
 
+        // Renamed from Zen's library; resolves true when this page will save the new name itself.
+        async renameBoard(id, title) {
+            const element = this.element;
+            const store = element?.store;
+            if (!store || store.current?.id !== id) return false;
+            await store.rename(id, title);
+            element.canvas?.applyTitleToHeading(title);
+            element.library?.refresh();
+            return !store._frozen && !store.current?.readOnly;
+        }
+
+        // Deleted from Zen's library: the document is dropped so pagehide has nothing to write back.
+        async dropBoard(id) {
+            const store = this.element?.store;
+            if (store?.current?.id === id) await store.remove(id);
+        }
+
         // Called by ZenEaselLiveParent when a right-click lands inside a live card. The
         // coordinates arrive in screen space, which is the one frame of reference both
         // sides share without either needing to know about the tile's scale or crop.

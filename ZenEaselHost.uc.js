@@ -1107,26 +1107,19 @@
             const trimmed = String(title || "").trim();
             if (!id || !trimmed) return;
 
-            const pages = [];
-            this._eachEaselView(id, null, hit => {
-                const page = hit.win.gZenEaselHost?._pageFor(hit.tab);
-                if (page?.element?.store) pages.push(page);
-            });
+            const tabs = [];
+            this._eachEaselView(id, null, hit => tabs.push(hit.tab));
 
-            if (pages.length) {
-                for (const page of pages) {
-                    await page.element.store.rename(id, trimmed);
-                    page.element.canvas?.applyTitleToHeading(trimmed);
-                    page.element.library?.refresh();
+            // A frozen or read-only page will not save, so with no other writer the file is patched here.
+            let willSave = false;
+            for (const tab of tabs) {
+                try {
+                    if (await this._pageFor(tab)?.renameBoard?.(id, trimmed)) willSave = true;
+                } catch (e) {
+                    console.error("[zen-easel] could not rename the open easel:", e);
                 }
-                // A frozen glance will not save, and neither will a read-only
-                // board. With nobody left to write the file, patch it here.
-                const willSave = pages.some(page => {
-                    const store = page.element.store;
-                    return store._doc && !store._frozen && !store._doc.readOnly;
-                });
-                if (willSave) return;
             }
+            if (willSave) return;
 
             const { EaselStore } =
                 ChromeUtils.importESModule(BASE + "background/store.sys.mjs");
@@ -1149,8 +1142,7 @@
             const tabs = [];
             this._eachEaselView(id, null, hit => tabs.push(hit));
             for (const hit of tabs) {
-                const page = hit.win.gZenEaselHost?._pageFor(hit.tab);
-                try { await page?.element?.store?.remove(id); } catch (e) {
+                try { await this._pageFor(hit.tab)?.dropBoard?.(id); } catch (e) {
                     console.error("[zen-easel] could not drop the open easel:", e);
                 }
             }

@@ -17,11 +17,17 @@
     const BASE = "chrome://sine/content/zen-easel/";
     const STORE = BASE + "background/store.sys.mjs";
     const SECTION_ID = "easels";
+    const LIBRARY_MODULE = "moz-src:///zen/library/ZenLibrary.mjs";
     const SEARCH_MODULE = "moz-src:///zen/library/sections/ZenLibrarySearchSection.mjs";
     const LIT_MODULE = "chrome://global/content/vendor/lit.all.mjs";
 
     const inBackground = event =>
         !!event && (event.button === 1 || event.getModifierState("Accel"));
+
+    function lastTabPref() {
+        try { return Services.prefs.getStringPref("zen.library.last-tab", ""); }
+        catch (e) { return ""; }
+    }
 
     function promptText(title, message, initial) {
         const value = { value: initial };
@@ -36,17 +42,37 @@
 
         install() {
             this._cancelled = false;
+            // Read now: the library's constructor rewrites last-tab to "history" before this section exists.
+            this._lastTab = lastTabPref();
             const run = () => {
                 if (this._cancelled || window.ZenEaselLibrarySection !== this) return;
                 try { this._start(); }
                 catch (e) { console.error("[zen-easel] could not add the library section:", e); }
             };
-            if (customElements.get("zen-library")) run();
-            else customElements.whenDefined("zen-library").then(run).catch(() => {});
+            if (customElements.get("zen-library")) {
+                run();
+                return;
+            }
+            customElements.whenDefined("zen-library").then(run).catch(() => {});
+            // Zen defines <zen-library> and creates it in one call, so the wrap needs the module loaded before the first open.
+            this._preload = window.requestIdleCallback(() => {
+                this._preload = null;
+                if (this._cancelled || customElements.get("zen-library")) return;
+                try {
+                    if (!Services.prefs.getBoolPref("zen.library.enabled", true)) return;
+                    ChromeUtils.importESModule(LIBRARY_MODULE, { global: "current" });
+                } catch (e) {
+                    console.error("[zen-easel] could not load Zen's library:", e);
+                }
+            }, { timeout: 10000 });
         },
 
         destroy() {
             this._cancelled = true;
+            if (this._preload) {
+                window.cancelIdleCallback(this._preload);
+                this._preload = null;
+            }
             for (const observer of this._observers) observer.disconnect();
             this._observers.clear();
             for (const section of document.querySelectorAll("zen-library-easels-section")) {
@@ -55,16 +81,20 @@
         },
 
         _start() {
-            this._defineElement();
             const ZenLibrary = customElements.get("zen-library");
-            if (!ZenLibrary || !customElements.get("zen-library-easels-section")) return;
+            // The Zen-Library mod defines its own <zen-library> without this API; leave that one alone.
+            if (typeof ZenLibrary?.getInstance !== "function" || typeof ZenLibrary.toggle !== "function") return;
+            this._defineElement();
+            if (!customElements.get("zen-library-easels-section")) return;
 
             if (!ZenLibrary.__zenEaselWrapped) {
                 ZenLibrary.__zenEaselWrapped = true;
                 const original = ZenLibrary.getInstance;
+                // Zen calls this on hot paths (compact mode, swipes), so only the creating call adopts.
                 ZenLibrary.getInstance = function (createIfMissing = true) {
+                    const creating = createIfMissing && !this.instance;
                     const lib = original.call(this, createIfMissing);
-                    if (lib) window.ZenEaselLibrarySection?.adopt(lib);
+                    if (lib && creating) window.ZenEaselLibrarySection?.adopt(lib, { restoreTab: true });
                     return lib;
                 };
             }
@@ -138,7 +168,7 @@
             customElements.define("zen-library-easels-section", ZenLibraryEaselsSection);
         },
 
-        adopt(lib) {
+        adopt(lib, { restoreTab = false } = {}) {
             if (!lib || this._cancelled) return;
             const Section = customElements.get("zen-library-easels-section");
             if (!Section) return;
@@ -156,14 +186,8 @@
                 if (!placed) sections[SECTION_ID] = Section;
                 lib.zenLibrarySections = sections;
 
-                // The constructor already chose a tab, before this id existed,
-                // so a last-tab pref of "easels" would have fallen back to history.
-                let last = "";
-                try { last = Services.prefs.getStringPref("zen.library.last-tab", ""); }
-                catch (e) { last = ""; }
-                if (last === SECTION_ID && lib.activeTab !== SECTION_ID) {
-                    lib.activeTab = SECTION_ID;
-                }
+                // Only while being created: toggle(tab) sets its own tab afterwards, so an explicit History or Downloads still wins.
+                if (restoreTab && this._lastTab === SECTION_ID) lib.activeTab = SECTION_ID;
                 lib.requestUpdate();
             }
             this._watchLabel(lib);
@@ -316,7 +340,9 @@
         _card(html, board) {
             const open = event => window.ZenEaselLibrarySection?.open(board, event);
             const title = board.title || "Untitled Easel";
-            const short = title.length > 20 ? `${title.slice(0, 20)}…` : title;
+            // By code point, so an emoji at the cut is not split into a lone surrogate.
+            const chars = [...title];
+            const short = chars.length > 20 ? `${chars.slice(0, 20).join("")}…` : title;
             const count = typeof board.objectCount === "number" ? board.objectCount : 0;
             return html`
                 <button class="easel-card" type="button" title=${title}

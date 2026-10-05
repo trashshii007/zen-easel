@@ -27,8 +27,9 @@ enforces that rather than leaving it to convention.
 
 ## Using it
 
-Open an easel with the toolbar button, or from the **Easels** section of the Zen Library
-(the button beside the workspace indicator in the sidebar).
+Open an easel with the toolbar button, or from the **Easels** section of Zen's Library
+(the button beside the workspace indicator in the sidebar). Right-click a card there to
+rename or delete it; Ctrl-click or middle-click opens it in the background.
 
 Every easel opens with a **centred heading** at the top, ready to type into. It is a real
 text box — move it, restyle it, colour it — and it *is* the easel's name: rename it here
@@ -1084,6 +1085,7 @@ window still open.
 | `modules-host/screenshot-hook.uc.js` | the **Easel** button on Zen's region bar and preview dialog, and the send-to-easel menu behind both |
 | `modules-host/capture-backdrop.uc.js` | works out what colour was behind the page, for both capture paths |
 | `modules-host/live-host.uc.js` | the live tiles themselves — `<browser>` elements, the layer over the easel tab, load watching |
+| `modules-host/library-section.uc.js` | the **Easels** section of Zen's own Library (Zen 1.23+): a `ZenLibrarySearchSection` subclass inserted after Media, with search, board cards, open (Ctrl/middle-click in the background), rename and delete; its sidebar icon is `resources/library-easels-sprite.svg` |
 | `modules-host/live-tab-identity.uc.js` | experimental, behind the *extension identity* setting: gives each live tile a hidden tab so extensions such as uBlock Origin and Dark Reader treat it as one |
 | `modules-host/split-resize.uc.js` | not an easel feature: fixes a Zen split-divider bug where mouse events from an in-process about: page arrive in that page's coordinates, so the divider snaps and the panes strobe. Behind a setting, and meant to be deleted once Zen fixes it upstream |
 

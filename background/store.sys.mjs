@@ -384,31 +384,35 @@ class EaselStoreImpl {
         entry.title = title;
         entry.updatedAt = now;
 
-        const pending = this._pending.get(id);
-        if (pending) {
-            pending.title = title;
-            pending.updatedAt = now;
-            try {
-                const doc = JSON.parse(pending.json);
-                retitleDocument(doc, title, now);
-                pending.json = JSON.stringify(doc);
-            } catch (e) {
-                console.error("[zen-easel] could not retitle a queued easel:", e);
-            }
-        } else {
-            try {
-                const path = this._easelPath(id);
-                if (await IOUtils.exists(path)) {
-                    const doc = await IOUtils.readJSON(path);
+        // On the write chain, so no drain can be mid-write to this file while it is read and rewritten.
+        const run = async () => {
+            const pending = this._pending.get(id);
+            if (pending) {
+                pending.title = title;
+                pending.updatedAt = now;
+                try {
+                    const doc = JSON.parse(pending.json);
                     retitleDocument(doc, title, now);
-                    await IOUtils.writeJSON(path, doc, { tmpPath: `${path}.tmp` });
+                    pending.json = JSON.stringify(doc);
+                } catch (e) {
+                    console.error("[zen-easel] could not retitle a queued easel:", e);
                 }
-            } catch (e) {
-                console.error("[zen-easel] could not rename the easel file:", e);
+            } else {
+                try {
+                    const path = this._easelPath(id);
+                    if (await IOUtils.exists(path)) {
+                        const doc = await IOUtils.readJSON(path);
+                        retitleDocument(doc, title, now);
+                        await IOUtils.writeJSON(path, doc, { tmpPath: `${path}.tmp` });
+                    }
+                } catch (e) {
+                    console.error("[zen-easel] could not rename the easel file:", e);
+                }
             }
-        }
-
-        await this._writeIndex();
+            await this._writeIndexNow();
+        };
+        this._writing = this._writing.then(run, run);
+        await this._writing;
         return true;
     }
 
