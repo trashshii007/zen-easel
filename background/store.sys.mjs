@@ -64,6 +64,18 @@ function uuid() {
     }
 }
 
+// The heading on the board is the name, when the board has one. A rename that
+// only touches the index comes back as the old lettering the next time the
+// file is opened, and the first edit then writes that old name over the index.
+function retitleDocument(doc, title, now) {
+    if (!doc || typeof doc !== "object") return;
+    doc.title = title;
+    doc.updatedAt = now;
+    if (typeof doc.titleObjectId !== "string" || !Array.isArray(doc.objects)) return;
+    const heading = doc.objects.find(object => object && object.id === doc.titleObjectId);
+    if (heading?.text && typeof heading.text === "object") heading.text.content = title;
+}
+
 class EaselStoreImpl {
     constructor() {
         this._root = null;
@@ -355,6 +367,49 @@ class EaselStoreImpl {
         if (pending) pending.title = title;
 
         await this._writeIndex();
+    }
+
+    // A rename from outside any easel page. renameEasel only updates the index,
+    // which is right when a page is about to save the document itself. With no
+    // page open, the file has to change too, or the next open restores the old
+    // name. A save already queued is patched in place so the drain cannot write
+    // the previous title back over this one.
+    async renameClosed(id, title) {
+        await this.init();
+        if (!isSafeId(id)) return false;
+        const entry = this._index.easels.find(e => e.id === id);
+        if (!entry) return false;
+
+        const now = Date.now();
+        entry.title = title;
+        entry.updatedAt = now;
+
+        const pending = this._pending.get(id);
+        if (pending) {
+            pending.title = title;
+            pending.updatedAt = now;
+            try {
+                const doc = JSON.parse(pending.json);
+                retitleDocument(doc, title, now);
+                pending.json = JSON.stringify(doc);
+            } catch (e) {
+                console.error("[zen-easel] could not retitle a queued easel:", e);
+            }
+        } else {
+            try {
+                const path = this._easelPath(id);
+                if (await IOUtils.exists(path)) {
+                    const doc = await IOUtils.readJSON(path);
+                    retitleDocument(doc, title, now);
+                    await IOUtils.writeJSON(path, doc, { tmpPath: `${path}.tmp` });
+                }
+            } catch (e) {
+                console.error("[zen-easel] could not rename the easel file:", e);
+            }
+        }
+
+        await this._writeIndex();
+        return true;
     }
 
     // Tracked so the shutdown blocker waits for it: a pagehide delete during quit races profileBeforeChange.

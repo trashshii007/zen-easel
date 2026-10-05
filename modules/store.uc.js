@@ -678,8 +678,8 @@
                 // see-through thumbnail that would pick up whatever is behind it.
                 const fill = window.ZenEaselObjects.backgroundFill(doc.background);
                 const bytes = await renderer.snapshot(doc.objects, {
-                    // 4/3, matching the card in zen-library's easels.css. Twice the CSS
-                    // size so the tile stays sharp on a HiDPI display.
+                    // 4/3. The library card is the media grid's square, which contains
+                    // this with object-fit. Twice a small card so it stays sharp on HiDPI.
                     maxWidth: 640,
                     maxHeight: 480,
                     padding: 24,

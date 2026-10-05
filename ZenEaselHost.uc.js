@@ -8,7 +8,8 @@
 // The easel itself is a document now — about:easel, in its own tab. What stays behind in
 // browser.xhtml is only what genuinely cannot live in a page: taking a snapshot of
 // whatever tab you are looking at, hooking Zen's own screenshot UI, the toolbar button,
-// and the "New Easel" entries on Zen's create-new menu and omnibox.
+// the Easels section of Zen's library, and the "New Easel" entries on Zen's create-new
+// menu and omnibox.
 //
 // Everything this exposes to the page goes through gZenEaselHost, and every value that
 // crosses is a plain string, number or byte array. The page holds a reference to this
@@ -31,7 +32,8 @@
         ["ZenEaselScreenshotHook", "modules-host/screenshot-hook.uc.js"],
         ["ZenEaselSplitResize", "modules-host/split-resize.uc.js"],
         ["ZenEaselLiveTabIdentity", "modules-host/live-tab-identity.uc.js"],
-        ["ZenEaselLiveHost", "modules-host/live-host.uc.js"]
+        ["ZenEaselLiveHost", "modules-host/live-host.uc.js"],
+        ["ZenEaselLibrarySection", "modules-host/library-section.uc.js"]
     ];
 
     // Sine re-runs this script on every browser window, and on every rebuild while
@@ -141,6 +143,11 @@
 
                 // CustomizableUI is not ready at script-load time on a cold start.
                 this._buttonTimer = setTimeout(() => this._createToolbarButton(), 2000);
+
+                // The Easels tab in Zen's own library. The panel, the search field
+                // and the card metrics are the library's; this only fills a section.
+                window.ZenEaselLibrarySection?.install();
+
                 log("host ready");
             } catch (e) {
                 // This runs during browser window startup. Anything that escapes here
@@ -1031,10 +1038,10 @@
         // A call with no easelId still means "open the easel" in the general sense — the
         // toolbar button and Ctrl+Shift+E — so it focuses whichever board is already open
         // rather than opening a redundant second copy of the last one.
-        openEasel(easelId = null) {
+        openEasel(easelId = null, { inBackground = false } = {}) {
             const existing = this._findEaselTab(easelId);
             if (existing) {
-                gBrowser.selectedTab = existing;
+                if (!inBackground) gBrowser.selectedTab = existing;
                 return existing;
             }
 
@@ -1046,16 +1053,16 @@
             if (easelId) {
                 const elsewhere = this._findEaselTabAnywhere(easelId);
                 if (elsewhere) {
-                    this._focusEaselTab(elsewhere);
+                    if (!inBackground) this._focusEaselTab(elsewhere);
                     return elsewhere.tab;
                 }
             }
 
             const tab = gBrowser.addTab(easelPageUrl(easelId), {
                 triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal(),
-                inBackground: false
+                inBackground
             });
-            gBrowser.selectedTab = tab;
+            if (!inBackground) gBrowser.selectedTab = tab;
 
             // The <link rel="icon"> in the page should cover this, but setting it here as
             // well is free and removes a class of "why is my tab showing a globe" that
@@ -1090,6 +1097,73 @@
             // straight onto it — there is no switch to start and nothing to await.
             const { entry } = await EaselStore.createDocument(title);
             return this.openEasel(entry.id);
+        }
+
+        // The library renames boards that may already be open. An open page owns
+        // the document in memory, and the next autosave would put the old name
+        // back, so every live view is renamed through its own store. Only a
+        // board with no page open is rewritten on disk from here.
+        async renameBoard(id, title) {
+            const trimmed = String(title || "").trim();
+            if (!id || !trimmed) return;
+
+            const pages = [];
+            this._eachEaselView(id, null, hit => {
+                const page = hit.win.gZenEaselHost?._pageFor(hit.tab);
+                if (page?.element?.store) pages.push(page);
+            });
+
+            if (pages.length) {
+                for (const page of pages) {
+                    await page.element.store.rename(id, trimmed);
+                    page.element.canvas?.applyTitleToHeading(trimmed);
+                    page.element.library?.refresh();
+                }
+                // A frozen glance will not save, and neither will a read-only
+                // board. With nobody left to write the file, patch it here.
+                const willSave = pages.some(page => {
+                    const store = page.element.store;
+                    return store._doc && !store._frozen && !store._doc.readOnly;
+                });
+                if (willSave) return;
+            }
+
+            const { EaselStore } =
+                ChromeUtils.importESModule(BASE + "background/store.sys.mjs");
+            await EaselStore.renameClosed(id, trimmed);
+        }
+
+        // Deletes the board, then closes every tab still showing it. The pages
+        // drop their documents first: pagehide saves whatever is still in
+        // memory, which would put the file back a moment after it was removed.
+        async deleteBoard(id) {
+            if (!id) return;
+
+            let windows;
+            try { windows = Services.wm.getEnumerator("navigator:browser"); }
+            catch (e) { windows = []; }
+            for (const win of windows) {
+                try { win.gZenEaselHost?._live?.unmountBoard(id); } catch (e) { }
+            }
+
+            const tabs = [];
+            this._eachEaselView(id, null, hit => tabs.push(hit));
+            for (const hit of tabs) {
+                const page = hit.win.gZenEaselHost?._pageFor(hit.tab);
+                try { await page?.element?.store?.remove(id); } catch (e) {
+                    console.error("[zen-easel] could not drop the open easel:", e);
+                }
+            }
+
+            const { EaselStore } =
+                ChromeUtils.importESModule(BASE + "background/store.sys.mjs");
+            await EaselStore.removeEasel(id);
+
+            for (const hit of tabs) {
+                try { hit.win.gBrowser.removeTab(hit.tab); } catch (e) {
+                    console.error("[zen-easel] could not close the easel tab:", e);
+                }
+            }
         }
 
         /* ------------------------------------------------------------- capture */
@@ -1943,6 +2017,7 @@
                 this._live = null;
             }
             if (this._buttonTimer) clearTimeout(this._buttonTimer);
+            try { window.ZenEaselLibrarySection?.destroy(); } catch (e) { }
             if (widget) {
                 try { CustomizableUI.destroyWidget("zen-easel-button"); } catch (e) { }
             } else {

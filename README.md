@@ -20,14 +20,11 @@ An infinite canvas at `about:easel` for screenshots, web pages, text, drawings, 
 
 ## Install
 
-Requires [Sine](https://github.com/CosmoCreeper/Sine) and [Zen Library](https://github.com/trashshii007/Zen-Library).
+Requires [Sine](https://github.com/CosmoCreeper/Sine). The Easels list is a section of Zen's own Library.
 
 1. Enable unofficial sources.
 2. Add this repository's URL.
-3. Install [Zen Library](https://github.com/trashshii007/Zen-Library)
-4. Restart Zen.
-
-**Requires my forked Zen Library**.
+3. Restart Zen.
 
 ## Opening a board
 
