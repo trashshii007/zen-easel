@@ -348,6 +348,10 @@
             try {
                 if (new URL(spec).searchParams.get("easel") === easelId) return true;
             } catch (e) { }
+            // A pending pin has not loaded. Reading contentWindow restores it, and the
+            // page that comes back then asks claimEasel whether it may exist — which
+            // closed the pin. The URL above is enough until the page is actually open.
+            if (tab.getAttribute("pending") === "true") return false;
             try {
                 if (browser.contentWindow?.gZenEaselPage?.easelId === easelId) return true;
             } catch (e) { }
@@ -396,6 +400,7 @@
                 const id = new URL(spec).searchParams.get("easel");
                 if (id) return id;
             } catch (e) { }
+            if (tab?.getAttribute("pending") === "true") return null;
             try {
                 return tab?.linkedBrowser?.contentWindow?.gZenEaselPage?.easelId ?? null;
             } catch (e) {
@@ -517,16 +522,26 @@
         // wanted either way.
         claimEasel(easelId, browser) {
             if (!easelId || !browser) return true;
+            const newTab = this._tabForBrowser(browser);
+            const sameTab = hit => !!(hit && (
+                hit.tab === newTab || hit.tab?.linkedBrowser === browser
+            ));
             const recorded = this._isResidentFor(this._captureResident, easelId)
                 ? this._captureResident : null;
-            const other = recorded || this._findEaselTabAnywhere(easelId, browser);
-            if (!other) return true;
+            // The record is the pin itself when that pin is what just woke up.
+            // Using it as another tab closed the pin.
+            const other = sameTab(recorded)
+                ? this._findEaselTabAnywhere(easelId, browser)
+                : (recorded || this._findEaselTabAnywhere(easelId, browser));
+            if (!other || sameTab(other)) {
+                this._keepResidentBoot(easelId, browser, newTab);
+                return true;
+            }
 
             // A glance satellite of a board that already has a tab is the one
             // permitted second view: the original is frozen so it cannot overwrite
             // the capture, and it is reloaded from disk when the glance goes away.
             // Anything else is still two writers and is refused.
-            const newTab = this._tabForBrowser(browser);
             // glance=1 is on the URL we handed addTab, so it is present even when
             // this runs before Glance has stamped zen-glance-tab. The other tab is
             // the original we meant to leave in place — not a second glance.
@@ -541,9 +556,39 @@
                 return true;
             }
 
+            // Close strips zen-glance-tab before the overlay tab is gone, so for a
+            // moment the overlay looks like a normal tab of this board. The pin
+            // asking now is the home tab; closing it is what deleted the easel.
+            if (this._glanceQuery(other.tab) && !this._glanceQuery(newTab)) {
+                this._keepResidentBoot(easelId, browser, newTab);
+                return true;
+            }
+
             log("that easel is already open in another tab; focusing it");
             this._focusEaselTab(other);
             return false;
+        }
+
+        // The home tab loaded while a capture glance is still the writer. The page
+        // that just booted is a new store, so without a freeze it would save the
+        // copy it read and put it back over the capture.
+        _keepResidentBoot(easelId, browser, tab) {
+            const satellite = this._satellite?.easelId === easelId
+                || this._pendingGlanceEaselId === easelId;
+            if (!satellite) return;
+            if (tab) this._markEaselStale(tab);
+            try {
+                browser.contentWindow?.gZenEaselPage?.element?.freezeWrites();
+            } catch (e) { }
+        }
+
+        _glanceQuery(tab) {
+            try {
+                const spec = tab?.linkedBrowser?.currentURI?.spec || "";
+                return new URL(spec).searchParams.get("glance") === "1";
+            } catch (e) {
+                return false;
+            }
         }
 
         _isGlanceSatellite(browser, tab, easelId) {
@@ -1015,7 +1060,10 @@
         // outlive its tab and keep the whole document alive.
         _pageFor(tab) {
             try {
-                return tab?.linkedBrowser?.contentWindow?.gZenEaselPage ?? null;
+                // contentWindow on a pending tab restores it. Freeze and reload look
+                // every pin up; waking one makes it boot and claimEasel then closes it.
+                if (!tab || tab.closing || tab.getAttribute("pending") === "true") return null;
+                return tab.linkedBrowser?.contentWindow?.gZenEaselPage ?? null;
             } catch (e) {
                 return null;
             }
